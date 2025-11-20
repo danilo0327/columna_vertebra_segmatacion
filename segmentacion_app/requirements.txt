@@ -5,8 +5,12 @@ python-multipart==0.0.6
 pillow==10.1.0
 numpy>=1.26.0,<2.0.0
 opencv-python==4.8.1.78
-torch==2.1.0
-torchvision==0.16.0
+# PyTorch - Instalar desde el índice oficial para evitar problemas
+# Para CPU: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# Para GPU: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# Versiones específicas (CPU por defecto):
+torch>=2.1.0
+torchvision>=0.16.0
 pydantic==2.5.0
 python-jose[cryptography]==3.3.0
 pydicom==2.4.3
