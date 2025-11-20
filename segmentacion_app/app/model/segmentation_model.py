@@ -253,7 +253,19 @@ class SegmentationModel:
             
             # Intentar cargar como modelo PyTorch
             try:
-                checkpoint = torch.load(model_path, map_location=self.device)
+                # PyTorch 2.6+ cambió el default de weights_only a True por seguridad
+                # Como estos son nuestros modelos propios y confiables, usamos weights_only=False
+                # También agregamos safe globals para numpy arrays que pueden estar en el checkpoint
+                try:
+                    # Intentar agregar safe globals para numpy (si está disponible en la versión)
+                    if hasattr(torch.serialization, 'add_safe_globals'):
+                        torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+                except (AttributeError, ImportError):
+                    # Si no está disponible, continuamos sin ello
+                    pass
+                
+                # Cargar checkpoint con weights_only=False (confiamos en nuestros modelos)
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
                 
                 # Intentar diferentes estructuras de checkpoint
                 if isinstance(checkpoint, dict):
