@@ -9,23 +9,30 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from PIL import Image
 import io
 
-from .config import STATIC_DIR, ALLOWED_EXTENSIONS, MAX_FILE_SIZE
+from .config import STATIC_DIR, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, AVAILABLE_MODELS
 from .model.segmentation_model import SegmentationModel
 from .schemas.segmentation import SegmentationResponse
 
 router = APIRouter()
 
-# Instancia global del modelo
-segmentation_model = None
+# Cache de modelos cargados
+models_cache = {}
 
 
-def get_model():
-    """Obtiene o inicializa el modelo de segmentación"""
-    global segmentation_model
-    if segmentation_model is None:
-        segmentation_model = SegmentationModel()
-        segmentation_model.load_model()
-    return segmentation_model
+def get_model(model_type: str = "deeplabv3plus"):
+    """
+    Obtiene o inicializa el modelo de segmentación
+    
+    Args:
+        model_type: Tipo de modelo ('deeplabv3plus' o 'unetplusplus')
+    
+    Returns:
+        Instancia del modelo cargado
+    """
+    if model_type not in models_cache:
+        models_cache[model_type] = SegmentationModel(model_type=model_type)
+        models_cache[model_type].load_model()
+    return models_cache[model_type]
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -51,17 +58,28 @@ async def home():
 
 
 @router.post("/api/segment", response_model=SegmentationResponse)
-async def segment_image(file: UploadFile = File(...)):
+async def segment_image(
+    file: UploadFile = File(...),
+    model_type: str = Form("deeplabv3plus")
+):
     """
     Endpoint para segmentar una imagen de radiografía
     
     Args:
         file: Archivo de imagen a segmentar
+        model_type: Tipo de modelo a usar ('deeplabv3plus' o 'unetplusplus')
         
     Returns:
-        SegmentationResponse con las URLs de las imágenes procesadas
+        SegmentationResponse con las URLs de las imágenes procesadas y métricas
     """
     try:
+        # Validar modelo
+        if model_type not in AVAILABLE_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Modelo no disponible: {model_type}. Modelos disponibles: {list(AVAILABLE_MODELS.keys())}"
+            )
+        
         # Validar extensión del archivo
         file_ext = Path(file.filename).suffix.lower()
         if file_ext not in ALLOWED_EXTENSIONS:
@@ -90,11 +108,17 @@ async def segment_image(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail=f"Error al cargar la imagen: {str(e)}")
         
         # Obtener modelo y realizar segmentación
-        model = get_model()
-        mask = model.predict(image)
+        model = get_model(model_type)
+        mask, probs = model.predict(image, return_probs=True)
         
-        # Crear visualizaciones
-        segmented_image = model.create_visualization(image, mask)
+        # Mejorar segmentación de T1
+        mask_improved = model.improve_t1_segmentation(mask, probs)
+        
+        # Calcular métricas (con probabilidades para IoU/Dice estimados)
+        metrics = model.calculate_metrics(mask_improved, probs)
+        
+        # Crear visualizaciones con máscara mejorada
+        segmented_image = model.create_visualization(image, mask_improved)
         
         # Guardar imágenes en static
         STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -105,28 +129,31 @@ async def segment_image(file: UploadFile = File(...)):
         image.save(original_path)
         original_url = f"/static/original_{unique_id}.png"
         
-        # Guardar imagen segmentada (solo máscara)
-        mask_image = Image.fromarray((mask * 85).astype(np.uint8))  # Escalar para visualización
+        # Guardar imagen segmentada (solo máscara) - usar máscara mejorada
+        mask_image = Image.fromarray((mask_improved * 85).astype(np.uint8))  # Escalar para visualización
         mask_path = STATIC_DIR / f"mask_{unique_id}.png"
         mask_image.save(mask_path)
         mask_url = f"/static/mask_{unique_id}.png"
+        
+        # Detectar clases presentes (usar máscara mejorada)
+        unique_classes = np.unique(mask_improved)
         
         # Guardar imagen superpuesta
         overlay_path = STATIC_DIR / f"overlay_{unique_id}.png"
         segmented_image.save(overlay_path)
         overlay_url = f"/static/overlay_{unique_id}.png"
         
-        # Detectar clases presentes
-        unique_classes = np.unique(mask)
         classes_detected = [model.classes[int(cls)] for cls in unique_classes if int(cls) < len(model.classes)]
         
         return SegmentationResponse(
             success=True,
             message="Segmentación completada exitosamente",
+            model_used=AVAILABLE_MODELS[model_type]["name"],
             original_image_url=original_url,
             segmented_image_url=mask_url,
             overlay_image_url=overlay_url,
-            classes_detected=classes_detected
+            classes_detected=classes_detected,
+            metrics=metrics
         )
     
     except HTTPException:
@@ -143,16 +170,43 @@ async def segment_image(file: UploadFile = File(...)):
 async def health_check():
     """Endpoint para verificar el estado de la API"""
     try:
-        model = get_model()
+        # Verificar todos los modelos disponibles
+        models_status = {}
+        for model_type in AVAILABLE_MODELS.keys():
+            try:
+                model = get_model(model_type)
+                models_status[model_type] = {
+                    "loaded": model.model_loaded,
+                    "device": str(model.device),
+                    "classes": model.classes
+                }
+            except Exception as e:
+                models_status[model_type] = {
+                    "loaded": False,
+                    "error": str(e)
+                }
+        
         return {
             "status": "healthy",
-            "model_loaded": model.model_loaded,
-            "device": str(model.device),
-            "classes": model.classes
+            "available_models": list(AVAILABLE_MODELS.keys()),
+            "models_status": models_status
         }
     except Exception as e:
         return {
             "status": "unhealthy",
             "error": str(e)
         }
+
+@router.get("/api/models")
+async def list_models():
+    """Endpoint para listar modelos disponibles"""
+    return {
+        "models": {
+            key: {
+                "name": config["name"],
+                "architecture": config["architecture"]
+            }
+            for key, config in AVAILABLE_MODELS.items()
+        }
+    }
 

@@ -17,6 +17,24 @@ MODEL_ZIP_PATH = BASE_DIR / "deeplabv3plus_20251114_040131.zip"
 CLASSES_JSON_PATH = BASE_DIR / "classes_deeplabv3plus.json"
 MODEL_EXTRACTED_DIR = MODEL_DIR / "deeplabv3plus"
 
+# Configuración de modelos disponibles
+AVAILABLE_MODELS = {
+    "deeplabv3plus": {
+        "name": "DeepLabV3+",
+        "model_dir": MODEL_DIR / "deeplabv3plus",
+        "model_file": "deeplabv3plus_best.pth",
+        "classes_file": "classes_deeplabv3plus.json",
+        "architecture": "DeepLabV3Plus"
+    },
+    "unetplusplus": {
+        "name": "U-Net++",
+        "model_dir": MODEL_DIR / "unetplusplus",
+        "model_file": "unetplusplus_best.pth",
+        "classes_file": "classes_unetplusplus.json",
+        "architecture": "UNetPlusPlus"
+    }
+}
+
 # Configuración de la aplicación
 APP_NAME = "Segmentación de Columna Vertebral"
 APP_VERSION = "1.0.0"

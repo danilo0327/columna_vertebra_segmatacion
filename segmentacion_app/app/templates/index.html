@@ -234,6 +234,138 @@
         .error.show {
             display: block;
         }
+
+        .model-selector {
+            margin-bottom: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .model-selector label {
+            display: block;
+            margin-bottom: 10px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .model-selector select {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            font-size: 1em;
+            background: white;
+            cursor: pointer;
+        }
+
+        .btn-clear {
+            margin-top: 20px;
+            padding: 12px 30px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: none;
+        }
+
+        .btn-clear.show {
+            display: inline-block;
+        }
+
+        .btn-clear:hover {
+            background: #c82333;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .metrics-container {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f0f8ff;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .metrics-container.show {
+            display: block;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .metric-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .metric-card.highlight {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .metric-card.highlight h4 {
+            color: white;
+        }
+
+        .metric-card.highlight .metric-value {
+            color: white;
+            font-weight: bold;
+            font-size: 1.3em;
+        }
+
+        .metric-card.class-metric {
+            border-left: 4px solid #667eea;
+            text-align: left;
+        }
+
+        .class-metrics-detail {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            margin-top: 10px;
+            font-size: 0.9em;
+        }
+
+        .class-metrics-detail div {
+            padding: 3px 0;
+        }
+
+        .metric-card h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 0.9em;
+        }
+
+        .metric-card.highlight h4 {
+            color: white;
+        }
+
+        .metric-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #28a745;
+        }
+
+        .model-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: #e8f5e9;
+            border-radius: 8px;
+            font-size: 0.9em;
+            color: #2e7d32;
+        }
     </style>
 </head>
 <body>
@@ -244,6 +376,14 @@
         </div>
 
         <div class="content">
+            <div class="model-selector">
+                <label for="modelSelect">🤖 Seleccionar Modelo:</label>
+                <select id="modelSelect">
+                    <option value="deeplabv3plus">DeepLabV3+</option>
+                    <option value="unetplusplus">U-Net++</option>
+                </select>
+            </div>
+
             <div class="upload-section" id="uploadSection">
                 <h2>📤 Cargar Radiografía</h2>
                 <p style="margin: 20px 0;">Arrastra y suelta una imagen o haz clic para seleccionar</p>
@@ -255,6 +395,7 @@
                     <strong>Archivo seleccionado:</strong> <span id="fileName"></span>
                 </div>
                 <button class="btn-process" id="btnProcess">Procesar Imagen</button>
+                <button class="btn-clear" id="btnClear">🔄 Limpiar y Cargar Nueva Imagen</button>
             </div>
 
             <div class="loading" id="loading">
@@ -282,6 +423,13 @@
                     </div>
                 </div>
 
+                <div class="model-info" id="modelInfo"></div>
+
+                <div class="metrics-container" id="metricsContainer">
+                    <h3 style="color: #667eea; margin-bottom: 15px;">📊 Métricas de Segmentación</h3>
+                    <div class="metrics-grid" id="metricsGrid"></div>
+                </div>
+
                 <div class="classes-detected" id="classesDetected">
                     <h3>Clases Detectadas:</h3>
                     <div id="classesList"></div>
@@ -292,10 +440,12 @@
 
     <script>
         const fileInput = document.getElementById('fileInput');
+        const modelSelect = document.getElementById('modelSelect');
         const uploadSection = document.getElementById('uploadSection');
         const selectedFile = document.getElementById('selectedFile');
         const fileName = document.getElementById('fileName');
         const btnProcess = document.getElementById('btnProcess');
+        const btnClear = document.getElementById('btnClear');
         const loading = document.getElementById('loading');
         const results = document.getElementById('results');
         const error = document.getElementById('error');
@@ -304,6 +454,9 @@
         const overlayImage = document.getElementById('overlayImage');
         const classesList = document.getElementById('classesList');
         const classesDetected = document.getElementById('classesDetected');
+        const modelInfo = document.getElementById('modelInfo');
+        const metricsContainer = document.getElementById('metricsContainer');
+        const metricsGrid = document.getElementById('metricsGrid');
 
         let selectedFileData = null;
 
@@ -364,10 +517,12 @@
             btnProcess.disabled = true;
             results.classList.remove('show');
             error.classList.remove('show');
+            metricsContainer.classList.remove('show');
 
             try {
                 const formData = new FormData();
                 formData.append('file', selectedFileData);
+                formData.append('model_type', modelSelect.value);
 
                 const response = await fetch('/api/segment', {
                     method: 'POST',
@@ -382,6 +537,18 @@
                     maskImage.src = data.segmented_image_url;
                     overlayImage.src = data.overlay_image_url;
 
+                    // Mostrar información del modelo usado
+                    if (data.model_used) {
+                        modelInfo.textContent = `Modelo utilizado: ${data.model_used}`;
+                        modelInfo.style.display = 'block';
+                    }
+
+                    // Mostrar métricas
+                    if (data.metrics) {
+                        displayMetrics(data.metrics);
+                        metricsContainer.classList.add('show');
+                    }
+
                     // Mostrar clases detectadas
                     if (data.classes_detected && data.classes_detected.length > 0) {
                         classesList.innerHTML = data.classes_detected.map(cls => 
@@ -393,6 +560,7 @@
                     }
 
                     results.classList.add('show');
+                    btnClear.classList.add('show');
                 } else {
                     showError(data.error || data.message || 'Error al procesar la imagen');
                 }
@@ -402,6 +570,125 @@
                 loading.classList.remove('show');
                 btnProcess.disabled = false;
             }
+        });
+
+        // Función para mostrar métricas
+        function displayMetrics(metrics) {
+            metricsGrid.innerHTML = '';
+            
+            // Métricas principales (IoU y Dice primero si están disponibles)
+            const mainMetrics = [];
+            
+            // Agregar IoU y Dice promedio si están disponibles
+            if (metrics.mean_iou_estimated !== undefined) {
+                mainMetrics.push({
+                    key: 'mean_iou_estimated',
+                    label: 'IoU Promedio (Estimado)',
+                    suffix: '',
+                    format: (v) => v.toFixed(4),
+                    highlight: true
+                });
+            }
+            
+            if (metrics.mean_dice_estimated !== undefined) {
+                mainMetrics.push({
+                    key: 'mean_dice_estimated',
+                    label: 'Dice Promedio (Estimado)',
+                    suffix: '',
+                    format: (v) => v.toFixed(4),
+                    highlight: true
+                });
+            }
+            
+            mainMetrics.push(
+                { key: 'foreground_coverage', label: 'Cobertura Foreground', suffix: '%', format: (v) => v.toFixed(2) },
+                { key: 'total_classes_detected', label: 'Clases Detectadas', suffix: '', format: (v) => v }
+            );
+
+            // Métricas por clase (porcentaje, IoU, Dice, confianza)
+            const classMetrics = {};
+            for (const [key, value] of Object.entries(metrics)) {
+                if (key.endsWith('_percentage')) {
+                    const className = key.replace('_percentage', '');
+                    if (!classMetrics[className]) classMetrics[className] = {};
+                    classMetrics[className].percentage = value;
+                } else if (key.endsWith('_iou_estimated')) {
+                    const className = key.replace('_iou_estimated', '');
+                    if (!classMetrics[className]) classMetrics[className] = {};
+                    classMetrics[className].iou = value;
+                } else if (key.endsWith('_dice_estimated')) {
+                    const className = key.replace('_dice_estimated', '');
+                    if (!classMetrics[className]) classMetrics[className] = {};
+                    classMetrics[className].dice = value;
+                } else if (key.endsWith('_confidence')) {
+                    const className = key.replace('_confidence', '');
+                    if (!classMetrics[className]) classMetrics[className] = {};
+                    classMetrics[className].confidence = value;
+                }
+            }
+
+            // Mostrar métricas principales
+            mainMetrics.forEach(metric => {
+                if (metrics[metric.key] !== undefined) {
+                    const value = metrics[metric.key];
+                    const formattedValue = metric.format(value);
+                    const card = document.createElement('div');
+                    card.className = 'metric-card' + (metric.highlight ? ' highlight' : '');
+                    card.innerHTML = `
+                        <h4>${metric.label}</h4>
+                        <div class="metric-value">${formattedValue}${metric.suffix}</div>
+                    `;
+                    metricsGrid.appendChild(card);
+                }
+            });
+
+            // Mostrar métricas por clase
+            for (const [className, classData] of Object.entries(classMetrics)) {
+                if (className === 'Background') continue; // Omitir background
+                
+                const card = document.createElement('div');
+                card.className = 'metric-card class-metric';
+                let content = `<h4>${className}</h4><div class="class-metrics-detail">`;
+                
+                if (classData.percentage !== undefined) {
+                    content += `<div><strong>Porcentaje:</strong> ${classData.percentage.toFixed(2)}%</div>`;
+                }
+                if (classData.iou !== undefined) {
+                    content += `<div><strong>IoU:</strong> ${classData.iou.toFixed(4)}</div>`;
+                }
+                if (classData.dice !== undefined) {
+                    content += `<div><strong>Dice:</strong> ${classData.dice.toFixed(4)}</div>`;
+                }
+                if (classData.confidence !== undefined) {
+                    content += `<div><strong>Confianza:</strong> ${classData.confidence.toFixed(4)}</div>`;
+                }
+                
+                content += '</div>';
+                card.innerHTML = content;
+                metricsGrid.appendChild(card);
+            }
+        }
+
+        // Botón limpiar
+        btnClear.addEventListener('click', () => {
+            // Limpiar archivo seleccionado
+            selectedFileData = null;
+            fileInput.value = '';
+            selectedFile.classList.remove('show');
+            btnProcess.classList.remove('show');
+            btnClear.classList.remove('show');
+            
+            // Limpiar resultados
+            results.classList.remove('show');
+            metricsContainer.classList.remove('show');
+            modelInfo.style.display = 'none';
+            error.classList.remove('show');
+            
+            // Limpiar imágenes
+            originalImage.src = '';
+            maskImage.src = '';
+            overlayImage.src = '';
+            classesList.innerHTML = '';
         });
 
         function showError(message) {
