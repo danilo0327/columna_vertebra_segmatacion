@@ -32,6 +32,13 @@ AVAILABLE_MODELS = {
         "model_file": "unetplusplus_best.pth",
         "classes_file": "classes_unetplusplus.json",
         "architecture": "UNetPlusPlus"
+    },
+    "unetplusplus_v2": {
+        "name": "U-Net++ v2",
+        "model_dir": MODEL_DIR / "unetplusplus_v2",
+        "model_file": "u_netplusplus_best.pth",
+        "classes_file": "classes_unetplusplus_v2.json",
+        "architecture": "UNetPlusPlus"
     }
 }
 
