@@ -216,8 +216,27 @@ class SegmentationModel:
                 classes_path = CLASSES_JSON_PATH
             
             with open(classes_path, 'r', encoding='utf-8') as f:
-                classes = json.load(f)
-            return classes
+                data = json.load(f)
+            
+            # Manejar diferentes formatos de JSON
+            if isinstance(data, list):
+                # Formato simple: ["Background", "T1", "V"]
+                return data
+            elif isinstance(data, dict):
+                # Formato con id2label: {"id2label": {"0": "F", "1": "V", ...}}
+                if "id2label" in data:
+                    # Ordenar por id y extraer labels
+                    id2label = data["id2label"]
+                    num_classes = len(id2label)
+                    classes = [id2label[str(i)] for i in range(num_classes)]
+                    return classes
+                elif "classes" in data:
+                    return data["classes"]
+                else:
+                    # Si es un dict pero no tiene el formato esperado, intentar como lista
+                    return list(data.values()) if data else ["Background", "T1", "V"]
+            else:
+                return ["Background", "T1", "V"]
         except Exception as e:
             print(f"Error cargando clases: {e}")
             return ["Background", "T1", "V"]
@@ -269,6 +288,35 @@ class SegmentationModel:
                 
                 # Intentar diferentes estructuras de checkpoint
                 if isinstance(checkpoint, dict):
+                    # Verificar si el checkpoint es directamente un state_dict (OrderedDict)
+                    # con keys que empiezan con "model." (modelo completo guardado)
+                    first_key = list(checkpoint.keys())[0] if checkpoint else ""
+                    if first_key.startswith("model.") and 'model_state_dict' not in checkpoint and 'state_dict' not in checkpoint:
+                        # El checkpoint es directamente el state_dict con prefijo "model."
+                        # Necesitamos remover el prefijo o cargar el modelo completo
+                        print("Detectado checkpoint con prefijo 'model.' - cargando modelo de torchvision...")
+                        try:
+                            from torchvision.models.segmentation import deeplabv3_resnet50
+                            self.model = deeplabv3_resnet50(
+                                num_classes=NUM_CLASSES,
+                                pretrained_backbone=False
+                            )
+                            # Remover el prefijo "model." de las keys
+                            state_dict_clean = {}
+                            for key, value in checkpoint.items():
+                                new_key = key.replace("model.", "", 1) if key.startswith("model.") else key
+                                state_dict_clean[new_key] = value
+                            self.model.load_state_dict(state_dict_clean, strict=False)
+                            self.model = self.model.to(self.device)
+                            self.model.eval()
+                            print(f"Modelo {self.model_config['name']} cargado exitosamente")
+                            self.model_loaded = True
+                            print(f"Modelo cargado exitosamente en {self.device}")
+                            return
+                        except Exception as e:
+                            print(f"Error cargando modelo con prefijo 'model.': {e}")
+                            # Continuar con el flujo normal
+                    
                     if 'model' in checkpoint:
                         # Modelo completo guardado
                         self.model = checkpoint['model']
@@ -511,13 +559,21 @@ class SegmentationModel:
             mask = cv2.resize(mask.astype(np.uint8), (img_array.shape[1], img_array.shape[0]), 
                             interpolation=cv2.INTER_NEAREST).astype(np.int32)
         
-        # Crear colores más distintivos para cada clase (uint8)
-        # T1 en azul brillante, V (columna) en verde/amarillo para mejor diferenciación
-        colors = np.array([
-            [0, 0, 0],           # Background - negro
-            [0, 150, 255],       # T1 - azul brillante (más visible)
-            [255, 200, 0],       # V - amarillo/naranja (diferente a T1)
-        ], dtype=np.uint8)
+        # Crear colores según la imagen de referencia: V (columna) en verde, T1 en rojo
+        # Mapear colores según el nombre de la clase
+        colors = np.zeros((len(self.classes), 3), dtype=np.uint8)
+        
+        for i, class_name in enumerate(self.classes):
+            class_name_lower = class_name.lower()
+            if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F':
+                colors[i] = [0, 0, 0]  # Background - negro
+            elif 't1' in class_name_lower:
+                colors[i] = [255, 0, 0]  # T1 - rojo
+            elif 'v' in class_name_lower or 'columna' in class_name_lower:
+                colors[i] = [0, 255, 0]  # V (Columna) - verde
+            else:
+                # Color por defecto si no coincide
+                colors[i] = [128, 128, 128]  # Gris
         
         # Crear imagen de segmentación coloreada
         # Asegurar que mask tenga la forma correcta para indexar

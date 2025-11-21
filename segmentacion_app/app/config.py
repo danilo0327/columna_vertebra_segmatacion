@@ -39,6 +39,13 @@ AVAILABLE_MODELS = {
         "model_file": "u_netplusplus_best.pth",
         "classes_file": "classes_unetplusplus_v2.json",
         "architecture": "UNetPlusPlus"
+    },
+    "deeplab_resnet50": {
+        "name": "DeepLabV3+ ResNet50",
+        "model_dir": MODEL_DIR / "deeplab_resnet50",
+        "model_file": "model_spine_t1_deeplabv3.pth",
+        "classes_file": "spine_t1_classes.json",
+        "architecture": "DeepLabV3Plus"
     }
 }
 
