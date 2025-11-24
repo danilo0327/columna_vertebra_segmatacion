@@ -306,8 +306,9 @@ class SegmentationModel:
                 # Intentar diferentes estructuras de checkpoint
                 if isinstance(checkpoint, dict):
                     # Verificar si el checkpoint es directamente un state_dict (OrderedDict)
-                    # con keys que empiezan con "model." (modelo completo guardado)
                     first_key = list(checkpoint.keys())[0] if checkpoint else ""
+                    
+                    # Caso 1: Checkpoint es directamente un state_dict con prefijo "model."
                     if first_key.startswith("model.") and 'model_state_dict' not in checkpoint and 'state_dict' not in checkpoint:
                         # El checkpoint es directamente el state_dict con prefijo "model."
                         # Necesitamos remover el prefijo o cargar el modelo completo
@@ -461,10 +462,63 @@ class SegmentationModel:
                                 print("Modelo DeepLabV3+ ResNet50 cargado exitosamente")
                             except Exception as e:
                                 raise RuntimeError(f"Error cargando modelo: {e}")
+                    # Caso 2: Checkpoint es directamente un state_dict sin wrapper (como DeepLabV3pp)
+                    elif first_key.startswith("enc1") or first_key.startswith("conv0_0"):
+                        # Es un state_dict directo de una arquitectura personalizada
+                        state_dict = checkpoint
+                        architecture_name = self.model_config["architecture"]
+                        
+                        # Detectar arquitectura por las keys
+                        is_deeplab = 'enc1' in first_key and ('aspp' in first_key or 'decoder' in first_key)
+                        is_unetpp = 'conv0_0' in first_key or 'conv0_1' in first_key
+                        
+                        print(f"Detectado state_dict directo - Reconstruyendo arquitectura {architecture_name}...")
+                        
+                        if architecture_name == "DeepLabV3Plus" or is_deeplab:
+                            try:
+                                self.model = DeepLabV3Plus(
+                                    in_channels=3,
+                                    num_classes=NUM_CLASSES
+                                )
+                                self.model.load_state_dict(state_dict, strict=False)
+                                self.model = self.model.to(self.device)
+                                self.model.eval()
+                                print(f"✅ Modelo {self.model_config['name']} cargado exitosamente")
+                            except Exception as e:
+                                raise RuntimeError(
+                                    f"Error cargando modelo DeepLabV3+: {str(e)}\n"
+                                    f"Verifica que la estructura del state_dict coincida con la arquitectura."
+                                )
+                        elif architecture_name == "UNetPlusPlus" or is_unetpp:
+                            try:
+                                print(f"Construyendo arquitectura UNetPlusPlus...")
+                                self.model = UNetPlusPlus(
+                                    in_channels=3,
+                                    num_classes=NUM_CLASSES
+                                )
+                                print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
+                                missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+                                if missing_keys:
+                                    print(f"⚠️  Advertencia: {len(missing_keys)} keys faltantes")
+                                if unexpected_keys:
+                                    print(f"⚠️  Advertencia: {len(unexpected_keys)} keys inesperadas")
+                                
+                                self.model = self.model.to(self.device)
+                                self.model.eval()
+                                print(f"✅ Modelo {self.model_config['name']} cargado exitosamente")
+                            except Exception as e:
+                                import traceback
+                                traceback.print_exc()
+                                raise RuntimeError(
+                                    f"Error cargando modelo UNet++: {str(e)}\n"
+                                    f"Verifica que la estructura del state_dict coincida con la arquitectura."
+                                )
+                        else:
+                            raise ValueError(f"Arquitectura '{architecture_name}' no soportada para state_dict directo.")
                     else:
                         # Si es un dict pero no tiene las keys esperadas, asumir que es el modelo completo
                         # Esto es poco probable pero lo manejamos
-                        raise ValueError(f"Formato de checkpoint no reconocido. Keys encontradas: {list(checkpoint.keys())}")
+                        raise ValueError(f"Formato de checkpoint no reconocido. Keys encontradas: {list(checkpoint.keys())[:10]}")
                 else:
                     # Si no es dict, asumir que es el modelo completo
                     self.model = checkpoint
