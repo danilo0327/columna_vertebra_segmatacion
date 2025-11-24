@@ -284,7 +284,24 @@ class SegmentationModel:
                     pass
                 
                 # Cargar checkpoint con weights_only=False (confiamos en nuestros modelos)
-                checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+                # Usar map_location='cpu' primero para evitar problemas de memoria con GPU
+                try:
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                    print(f"Checkpoint cargado exitosamente desde {model_path}")
+                except EOFError as e:
+                    raise RuntimeError(
+                        f"Error al cargar el modelo: El archivo parece estar corrupto o incompleto.\n"
+                        f"Archivo: {model_path}\n"
+                        f"Error: {str(e)}\n"
+                        f"Posibles soluciones:\n"
+                        f"1. Verifica que el archivo se descargó completamente desde Git LFS\n"
+                        f"2. Ejecuta: git lfs pull\n"
+                        f"3. Verifica el tamaño del archivo (debe ser > 100 MB para modelos U-Net++)"
+                    ) from e
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Error inesperado al cargar el modelo desde {model_path}: {str(e)}"
+                    ) from e
                 
                 # Intentar diferentes estructuras de checkpoint
                 if isinstance(checkpoint, dict):
@@ -351,20 +368,32 @@ class SegmentationModel:
                                     f"Error cargando modelo DeepLabV3+: {str(e)}\n"
                                     f"Verifica que la estructura del state_dict coincida con la arquitectura."
                                 )
-                        elif architecture_name == "UNetPlusPlus" or is_unetpp:
+                        el                        if architecture_name == "UNetPlusPlus" or is_unetpp:
                             try:
+                                print(f"Construyendo arquitectura UNetPlusPlus...")
                                 self.model = UNetPlusPlus(
                                     in_channels=3,
                                     num_classes=NUM_CLASSES
                                 )
-                                self.model.load_state_dict(state_dict)
+                                print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
+                                # Intentar cargar con strict=False primero para ver qué falta
+                                missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+                                if missing_keys:
+                                    print(f"⚠️  Advertencia: {len(missing_keys)} keys faltantes (primeras 5: {missing_keys[:5]})")
+                                if unexpected_keys:
+                                    print(f"⚠️  Advertencia: {len(unexpected_keys)} keys inesperadas (primeras 5: {unexpected_keys[:5]})")
+                                
+                                print(f"Moviendo modelo a {self.device}...")
                                 self.model = self.model.to(self.device)
                                 self.model.eval()
-                                print(f"Modelo {self.model_config['name']} cargado exitosamente")
+                                print(f"✅ Modelo {self.model_config['name']} cargado exitosamente")
                             except Exception as e:
+                                import traceback
+                                traceback.print_exc()
                                 raise RuntimeError(
                                     f"Error cargando modelo UNet++: {str(e)}\n"
-                                    f"Verifica que la estructura del state_dict coincida con la arquitectura."
+                                    f"Verifica que la estructura del state_dict coincida con la arquitectura.\n"
+                                    f"Primera key del state_dict: {list(state_dict.keys())[0] if state_dict else 'N/A'}"
                                 )
                         else:
                             # Intentar con arquitecturas estándar de torchvision

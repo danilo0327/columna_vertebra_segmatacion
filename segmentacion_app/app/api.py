@@ -108,8 +108,21 @@ async def segment_image(
             raise HTTPException(status_code=400, detail=f"Error al cargar la imagen: {str(e)}")
         
         # Obtener modelo y realizar segmentación
-        model = get_model(model_type)
-        mask, probs = model.predict(image, return_probs=True)
+        try:
+            model = get_model(model_type)
+        except Exception as e:
+            error_msg = f"Error al cargar el modelo {model_type}: {str(e)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+        
+        try:
+            mask, probs = model.predict(image, return_probs=True)
+        except Exception as e:
+            error_msg = f"Error al procesar la imagen con el modelo {model_type}: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Mejorar segmentación de T1
         mask_improved = model.improve_t1_segmentation(mask, probs)
