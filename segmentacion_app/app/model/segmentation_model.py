@@ -368,7 +368,7 @@ class SegmentationModel:
                                     f"Error cargando modelo DeepLabV3+: {str(e)}\n"
                                     f"Verifica que la estructura del state_dict coincida con la arquitectura."
                                 )
-                        el                        if architecture_name == "UNetPlusPlus" or is_unetpp:
+                        elif architecture_name == "UNetPlusPlus" or is_unetpp:
                             try:
                                 print(f"Construyendo arquitectura UNetPlusPlus...")
                                 self.model = UNetPlusPlus(
