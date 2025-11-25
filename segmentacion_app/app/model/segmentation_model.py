@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 import cv2
+from torchvision.models import resnet50
 
 from ..config import (
     MODEL_ZIP_PATH,
@@ -386,6 +387,209 @@ class DeepLabV3pp(nn.Module):
         return output
 
 
+# ============================================================================
+# MODELO: DeepLabV3PlusDenseDecoder (del notebook DeepLabV3+Densedecoder.ipynb)
+# ============================================================================
+
+class ASPP_ResNet(nn.Module):
+    """ASPP para ResNet50 (2048 canales de entrada)"""
+    def __init__(self, in_channels, out_channels=256, rates=(6, 12, 18)):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=rates[0],
+                      dilation=rates[0], bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=rates[1],
+                      dilation=rates[1], bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=rates[2],
+                      dilation=rates[2], bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.image_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.project = nn.Sequential(
+            nn.Conv2d(out_channels * 5, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+        )
+
+    def forward(self, x):
+        h, w = x.shape[2:]
+        x1 = self.conv1(x)
+        x2 = self.conv2(x)
+        x3 = self.conv3(x)
+        x4 = self.conv4(x)
+        x5 = self.image_pool(x)
+        x5 = F.interpolate(x5, size=(h, w), mode="bilinear", align_corners=False)
+        x_cat = torch.cat([x1, x2, x3, x4, x5], dim=1)
+        return self.project(x_cat)
+
+
+class DenseDecoderBlock(nn.Module):
+    """Bloque de decoder denso con atención"""
+    def __init__(self, in_ch, skip_ch, prev_ch, out_ch, use_attention=True):
+        super().__init__()
+        self.use_attention = use_attention and skip_ch > 0
+        if self.use_attention:
+            self.att = AttentionGate(F_g=in_ch, F_l=skip_ch, F_int=out_ch)
+
+        # conv para fusionar (in_ch + prev_ch + skip_ch) -> out_ch
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch + prev_ch + (skip_ch if self.use_attention else 0),
+                      out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x, skip=None, prev_upsampled=None, scale_factor=2):
+        x_up = F.interpolate(x, scale_factor=scale_factor, mode="bilinear",
+                             align_corners=False)
+
+        feats = [x_up]
+
+        if prev_upsampled is not None:
+            feats.append(prev_upsampled)
+
+        if self.use_attention and skip is not None:
+            # redimensionar skip al tamaño de x_up por si acaso
+            if skip.shape[2:] != x_up.shape[2:]:
+                skip = F.interpolate(skip, size=x_up.shape[2:], mode="bilinear",
+                                     align_corners=False)
+            skip_att = self.att(x_up, skip)
+            feats.append(skip_att)
+
+        x_cat = torch.cat(feats, dim=1)
+        out = self.conv(x_cat)
+        return out
+
+
+class DeepLabV3PlusDenseDecoder(nn.Module):
+    """DeepLabV3+ con ResNet50 backbone y decoder denso (del notebook)"""
+    def __init__(self, num_classes=3):
+        super().__init__()
+
+        # ResNet50 backbone (como DeepLab, con dilataciones)
+        self.backbone = resnet50(weights=None,
+                                 replace_stride_with_dilation=[False, True, True])
+
+        # Tomamos features en varios niveles
+        self.layer0 = nn.Sequential(
+            self.backbone.conv1,
+            self.backbone.bn1,
+            self.backbone.relu,
+        )  # ~128x128 para input 256
+        self.maxpool = self.backbone.maxpool          # 64x64
+        self.layer1 = self.backbone.layer1            # 64x64
+        self.layer2 = self.backbone.layer2            # 32x32
+        self.layer3 = self.backbone.layer3            # 32x32 (dilatado)
+        self.layer4 = self.backbone.layer4            # 32x32 (dilatado)
+
+        # ASPP sobre layer4
+        self.aspp = ASPP_ResNet(in_channels=2048, out_channels=256)
+
+        # Proyección de skips
+        self.enc_32 = nn.Conv2d(1024, 256, 1)   # de layer3 (32x32)
+        self.enc_64 = nn.Conv2d(256, 128, 1)    # de layer1 (64x64)
+        self.enc_128 = nn.Conv2d(64, 64, 1)     # de layer0 (128x128)
+
+        # Decoder denso (4 niveles)
+        # Nivel 0: 32x32 (no upsample todavía, solo conv)
+        self.dec0_conv = nn.Sequential(
+            nn.Conv2d(256, 256, 3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+        )
+
+        # Nivel 1: 32 -> 64, con skip de 64x64
+        self.dec1 = DenseDecoderBlock(
+            in_ch=256,   # viene de dec0
+            skip_ch=128, # enc_64
+            prev_ch=0,
+            out_ch=128,
+            use_attention=True,
+        )
+
+        # Nivel 2: 64 -> 128, con skip de 128x128 y conexiones densas
+        self.dec2 = DenseDecoderBlock(
+            in_ch=128,
+            skip_ch=64,   # enc_128
+            prev_ch=256,  # upsample de dec0
+            out_ch=64,
+            use_attention=True,
+        )
+
+        # Nivel 3: 128 -> 256, sin skip (solo dense de prev)
+        self.dec3 = DenseDecoderBlock(
+            in_ch=64,
+            skip_ch=0,      # sin skip extra
+            prev_ch=128+256, # upsample de dec1 y dec0
+            out_ch=64,
+            use_attention=False,
+        )
+
+        # Clasificador final
+        self.classifier = nn.Conv2d(64, num_classes, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        x0 = self.layer0(x)            # 128x128
+        x0p = self.maxpool(x0)         # 64x64
+        x1 = self.layer1(x0p)          # 64x64
+        x2 = self.layer2(x1)           # 32x32
+        x3 = self.layer3(x2)           # 32x32
+        x4 = self.layer4(x3)           # 32x32
+
+        # ASPP
+        x_aspp = self.aspp(x4)         # 32x32
+
+        # Skips proyectados
+        enc32 = self.enc_32(x3)        # 256 canales, 32x32
+        enc64 = self.enc_64(x1)        # 128 canales, 64x64
+        enc128 = self.enc_128(x0)      # 64 canales, 128x128
+
+        # Decoder nivel 0 (32x32)
+        d0 = self.dec0_conv(x_aspp)    # 256, 32x32
+
+        # Decoder nivel 1 (32 -> 64), con atención sobre enc64
+        d1 = self.dec1(d0, skip=enc64, prev_upsampled=None, scale_factor=2)  # 128, 64x64
+
+        # Decoder nivel 2 (64 -> 128), denso: usa d1 y d0 upsamplados + skip enc128
+        d0_up_128 = F.interpolate(d0, scale_factor=4, mode="bilinear", align_corners=False)  # 256, 128x128
+        d2 = self.dec2(d1, skip=enc128, prev_upsampled=d0_up_128, scale_factor=2)           # 64, 128x128
+
+        # Decoder nivel 3 (128 -> 256), denso: concat de d2 + d1_up + d0_up
+        d1_up_256 = F.interpolate(d1, scale_factor=4, mode="bilinear", align_corners=False) # 128, 256x256
+        d0_up_256 = F.interpolate(d0, scale_factor=8, mode="bilinear", align_corners=False) # 256, 256x256
+
+        # Para el bloque dec3, pasamos una "prev_upsampled" que concatena d1_up y d0_up
+        prev_cat = torch.cat([d1_up_256, d0_up_256], dim=1)  # (128+256, 256x256)
+        d3 = self.dec3(d2, skip=None, prev_upsampled=prev_cat, scale_factor=2)               # 64, 256x256
+
+        logits = self.classifier(d3)   # (B, num_classes, 256,256)
+        return logits
+
+
 class UNetPlusPlus(nn.Module):
     """Arquitectura U-Net++ personalizada"""
     def __init__(self, in_channels=3, num_classes=3):
@@ -606,18 +810,48 @@ class SegmentationModel:
                         architecture_name = self.model_config["architecture"]
                         
                         # Detectar arquitectura por las keys
+                        has_backbone = 'backbone' in first_key  # DeepLabV3PlusDenseDecoder tiene backbone
                         has_dec1 = any('dec1' in k for k in list(checkpoint.keys())[:30])
                         has_att3 = any('att3' in k for k in list(checkpoint.keys())[:30])
-                        is_deeplabpp = has_dec1 and has_att3  # DeepLabV3pp tiene decoder denso y atención
+                        is_deeplabpp = has_dec1 and has_att3 and not has_backbone  # DeepLabV3pp tiene decoder denso y atención pero NO backbone
+                        is_deeplab_dense = has_backbone  # DeepLabV3PlusDenseDecoder tiene backbone
                         is_deeplab = 'enc1' in first_key and ('aspp' in first_key or 'decoder' in first_key or any('decoder' in k for k in list(checkpoint.keys())[:20]))
                         is_unetpp = 'conv0_0' in first_key or 'conv0_1' in first_key
                         
                         print(f"Detectado state_dict directo - Reconstruyendo arquitectura {architecture_name}...")
                         print(f"Primera key: {first_key}")
                         print(f"Total de parámetros: {len(state_dict)}")
+                        print(f"Es DeepLabV3PlusDenseDecoder: {is_deeplab_dense} (backbone: {has_backbone})")
                         print(f"Es DeepLabV3pp: {is_deeplabpp} (dec1: {has_dec1}, att3: {has_att3})")
                         
-                        if architecture_name == "DeepLabV3pp" or is_deeplabpp:
+                        if architecture_name == "DeepLabV3PlusDenseDecoder" or is_deeplab_dense:
+                            try:
+                                print("Construyendo arquitectura DeepLabV3PlusDenseDecoder...")
+                                self.model = DeepLabV3PlusDenseDecoder(
+                                    num_classes=NUM_CLASSES
+                                )
+                                print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
+                                missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+                                if missing_keys:
+                                    print(f"⚠️  Advertencia: {len(missing_keys)} keys faltantes (primeras 5: {missing_keys[:5]})")
+                                if unexpected_keys:
+                                    print(f"⚠️  Advertencia: {len(unexpected_keys)} keys inesperadas (primeras 5: {unexpected_keys[:5]})")
+                                
+                                self.model = self.model.to(self.device)
+                                self.model.eval()
+                                print(f"✅ Modelo {self.model_config['name']} cargado exitosamente")
+                                self.model_loaded = True
+                                print(f"Modelo cargado exitosamente en {self.device}")
+                                return
+                            except Exception as e:
+                                import traceback
+                                traceback.print_exc()
+                                raise RuntimeError(
+                                    f"Error cargando modelo DeepLabV3PlusDenseDecoder: {str(e)}\n"
+                                    f"Verifica que la estructura del state_dict coincida con la arquitectura.\n"
+                                    f"Primera key: {first_key}"
+                                )
+                        elif architecture_name == "DeepLabV3pp" or is_deeplabpp:
                             try:
                                 print("Construyendo arquitectura DeepLabV3pp...")
                                 self.model = DeepLabV3pp(

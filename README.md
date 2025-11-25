@@ -246,7 +246,7 @@ columna_vertebra_segmatacion/
 │   │   └── tests/            # Tests
 │   └── requirements.txt      # Dependencias
 ├── models/                   # Modelos entrenados
-│   ├── deeplab_hybrid/       # DeepLabV3++ (Decoder Denso)
+│   ├── deeplab_densedecoder/ # DeepLabV3++ (Decoder Denso)
 │   ├── unetplusplus_v2/     # U-Net++ v2
 │   └── deeplab_resnet50/    # DeepLabV3+ ResNet50
 ├── notebooks/               # Jupyter notebooks de entrenamiento
@@ -851,7 +851,7 @@ Los modelos se configuran en `segmentacion_app/app/config.py`:
 
 ```python
 AVAILABLE_MODELS = {
-    "deeplab_hybrid": {...},
+    "deeplab_dense_decoder": {...},
     "unetplusplus_v2": {...},
     "deeplab_resnet50": {...}
 }
@@ -876,7 +876,7 @@ Segmenta una imagen de radiografía.
 **Parámetros (multipart/form-data):**
 - `file`: Archivo de imagen (PNG, JPG, JPEG, DICOM)
 - `model_type`: Tipo de modelo (opcional, default: "deeplab_resnet50")
-  - Valores: `"deeplab_hybrid"`, `"unetplusplus_v2"`, `"deeplab_resnet50"`
+  - Valores: `"deeplab_dense_decoder"`, `"unetplusplus_v2"`, `"deeplab_resnet50"`
 
 **Respuesta:**
 ```json
@@ -992,7 +992,7 @@ uvicorn segmentacion_app.app.main:app --port 8001
 
 ## 📊 Modelos Disponibles
 
-### DeepLabV3++ (Decoder Denso) - `deeplab_hybrid`
+### DeepLabV3++ (Decoder Denso) - `deeplab_dense_decoder`
 - **Arquitectura:** DeepLabV3+ con decoder denso tipo U-Net++
 - **Características:** ASPP con atención, decoder de 4 capas, módulos de atención
 - **Uso:** Balance entre precisión y complejidad

@@ -19,12 +19,12 @@ MODEL_EXTRACTED_DIR = MODEL_DIR / "deeplabv3plus"
 
 # Configuración de modelos disponibles
 AVAILABLE_MODELS = {
-    "deeplab_hybrid": {
+    "deeplab_dense_decoder": {
         "name": "DeepLabV3++ (Decoder Denso)",
-        "model_dir": MODEL_DIR / "deeplab_hybrid",
-        "model_file": "DeepLabV3pp_best.pth",
-        "classes_file": "classes_deeplab_hybrid.json",
-        "architecture": "DeepLabV3pp"
+        "model_dir": MODEL_DIR / "deeplab_densedecoder",
+        "model_file": "model_deeplab_dense_decoder.pth",
+        "classes_file": "deeplab_dense_decoder_classes.json",
+        "architecture": "DeepLabV3PlusDenseDecoder"
     },
     "unetplusplus_v2": {
         "name": "U-Net++ v2",

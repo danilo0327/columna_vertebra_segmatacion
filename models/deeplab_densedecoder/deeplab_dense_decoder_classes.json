@@ -1,4 +1,5 @@
 {
+  "model_name": "DeepLabV3PlusDenseDecoder",
   "id2label": {
     "0": "F",
     "1": "V",
@@ -11,9 +12,8 @@
   },
   "num_classes": 3,
   "img_size": [
-    512,
+    256,
     256
   ],
-  "notes": "0=Fondo, 1=Columna(V), 2=Vértebra T1"
+  "notes": "0=Fondo, 1=Columna (V), 2=Vértebra T1"
 }
-
