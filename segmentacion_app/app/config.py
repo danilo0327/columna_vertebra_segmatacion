@@ -24,7 +24,7 @@ AVAILABLE_MODELS = {
         "model_dir": MODEL_DIR / "deeplab_hybrid",
         "model_file": "DeepLabV3pp_best.pth",
         "classes_file": "classes_deeplab_hybrid.json",
-        "architecture": "DeepLabV3Plus"
+        "architecture": "DeepLabV3pp"
     },
     "unetplusplus_v2": {
         "name": "U-Net++ v2",

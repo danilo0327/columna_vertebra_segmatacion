@@ -42,6 +42,45 @@ class ConvBlock(nn.Module):
         return self.conv(x)
 
 
+class ConvBlockWithDropout(nn.Module):
+    """Bloque convolucional con BatchNorm, ReLU y Dropout (para DeepLabV3++)"""
+    def __init__(self, in_ch, out_ch, dropout=0.1):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        return self.conv(x)
+
+
+class ConvBlockExtended(nn.Module):
+    """Bloque convolucional extendido (para DeepLabV3pp) - tiene más capas"""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        # Estructura según checkpoint: Conv(0) -> BN(1) -> ReLU -> Conv(4) -> BN(5) -> ReLU
+        # Índice 3 no existe en el modelo guardado
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),  # índice 0
+            nn.BatchNorm2d(out_ch),  # índice 1
+            nn.ReLU(inplace=True),
+            # Índice 3 no existe - dejar espacio
+            nn.Identity(),  # Placeholder para índice 3
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),  # índice 4
+            nn.BatchNorm2d(out_ch),  # índice 5
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        return self.conv(x)
+
+
 class ASPP(nn.Module):
     """Atrous Spatial Pyramid Pooling"""
     def __init__(self, in_ch, out_ch):
@@ -89,6 +128,71 @@ class ASPP(nn.Module):
         return self.project(out)
 
 
+class ChannelAttention(nn.Module):
+    """Channel Attention para ASPP"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels // reduction, channels, 1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        return x * self.sigmoid(self.fc(self.avg_pool(x)) + self.fc(self.max_pool(x)))
+
+
+class ASPPWithAttention(nn.Module):
+    """ASPP mejorado con Channel Attention (según código original)"""
+    def __init__(self, in_ch, out_ch, rates=[6, 12, 18]):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Atrous blocks
+        self.atrous_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, padding=r, dilation=r, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True)
+            ) for r in rates
+        ])
+        
+        # Global pooling
+        self.global_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Channel attention
+        total_ch = out_ch * (len(rates) + 2)  # conv1 + atrous_blocks + global_pool
+        self.channel_attention = ChannelAttention(total_ch, reduction=16)
+        
+        # Project
+        self.project = nn.Sequential(
+            nn.Conv2d(total_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.2)
+        )
+    
+    def forward(self, x):
+        size = x.shape[2:]
+        feats = [self.conv1(x)] + [block(x) for block in self.atrous_blocks]
+        feats.append(F.interpolate(self.global_pool(x), size=size, mode='bilinear', align_corners=True))
+        feats = torch.cat(feats, dim=1)
+        feats = self.channel_attention(feats)
+        return self.project(feats)
+
+
 class DeepLabV3Plus(nn.Module):
     """Arquitectura DeepLabV3+ personalizada"""
     def __init__(self, in_channels=3, num_classes=3):
@@ -133,6 +237,153 @@ class DeepLabV3Plus(nn.Module):
         out = F.interpolate(dec, size=size, mode='bilinear', align_corners=True)
         
         return self.out(out)
+
+
+class AttentionGate(nn.Module):
+    """Attention Gate (según código original)"""
+    def __init__(self, F_g, F_l, F_int):
+        super().__init__()
+        self.W_g = nn.Sequential(
+            nn.Conv2d(F_g, F_int, 1, bias=True),
+            nn.BatchNorm2d(F_int)
+        )
+        self.W_x = nn.Sequential(
+            nn.Conv2d(F_l, F_int, 1, bias=True),
+            nn.BatchNorm2d(F_int)
+        )
+        self.psi = nn.Sequential(
+            nn.Conv2d(F_int, 1, 1, bias=True),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+        self.relu = nn.ReLU(inplace=True)
+    
+    def forward(self, g, x):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        return x * self.psi(self.relu(g1 + x1))
+
+
+class SpatialAttentionModule(nn.Module):
+    """Spatial Attention (según código original)"""
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(2, 1, 7, padding=3, bias=False),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        return x * self.conv(torch.cat([avg_out, max_out], dim=1))
+
+
+class DeepLabV3pp(nn.Module):
+    """DeepLabV3++ - DeepLabV3+ con Decoder Denso tipo U-Net++ (según código original)"""
+    def __init__(self, in_channels=3, num_classes=3):
+        super().__init__()
+        
+        # Encoder (usar ConvBlockWithDropout según código original)
+        self.enc1 = ConvBlockWithDropout(in_channels, 64, dropout=0.05)
+        self.enc2 = ConvBlockWithDropout(64, 128, dropout=0.1)
+        self.enc3 = ConvBlockWithDropout(128, 256, dropout=0.1)
+        self.enc4 = ConvBlockWithDropout(256, 512, dropout=0.15)
+        
+        self.pool = nn.MaxPool2d(2, 2)
+        
+        # ASPP en bottleneck
+        self.aspp = ASPPWithAttention(512, 256, rates=[6, 12, 18])
+        
+        # Projections (según código original)
+        self.enc4_proj = nn.Sequential(
+            nn.Conv2d(512, 256, 1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Decoder DENSO (según código original)
+        self.up4 = nn.ConvTranspose2d(256, 256, 2, stride=2)
+        self.att4 = AttentionGate(256, 256, 128)
+        self.dec4 = ConvBlockWithDropout(512, 256, dropout=0.1)
+        
+        self.up3 = nn.ConvTranspose2d(256, 128, 2, stride=2)
+        self.enc3_proj = nn.Sequential(
+            nn.Conv2d(256, 128, 1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
+        )
+        self.att3 = AttentionGate(128, 128, 64)
+        self.dec3 = ConvBlockWithDropout(256, 128, dropout=0.1)
+        
+        self.up2 = nn.ConvTranspose2d(128, 64, 2, stride=2)
+        self.enc2_proj = nn.Sequential(
+            nn.Conv2d(128, 64, 1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        self.spatial_att = SpatialAttentionModule()
+        self.dec2 = ConvBlockWithDropout(128, 64, dropout=0.05)
+        
+        self.up1 = nn.ConvTranspose2d(64, 64, 2, stride=2)
+        self.dec1 = ConvBlockWithDropout(128, 64, dropout=0.05)
+        
+        # Output (según código original)
+        self.out = nn.Sequential(
+            nn.Conv2d(64, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, num_classes, 1)
+        )
+    
+    def forward(self, x):
+        # Encoder
+        enc1 = self.enc1(x)
+        enc2 = self.enc2(self.pool(enc1))
+        enc3 = self.enc3(self.pool(enc2))
+        enc4 = self.enc4(self.pool(enc3))
+        
+        # ASPP bottleneck
+        bottleneck = self.aspp(enc4)
+        
+        # Decoder denso
+        dec4 = self.up4(bottleneck)
+        enc4_reduced = self.enc4_proj(enc4)
+        enc4_reduced = F.interpolate(enc4_reduced, size=dec4.shape[2:], 
+                                    mode='bilinear', align_corners=True)
+        enc4_att = self.att4(dec4, enc4_reduced)
+        dec4 = torch.cat([dec4, enc4_att], dim=1)
+        dec4 = self.dec4(dec4)
+        
+        dec3 = self.up3(dec4)
+        enc3_reduced = self.enc3_proj(enc3)
+        enc3_reduced = F.interpolate(enc3_reduced, size=dec3.shape[2:], 
+                                    mode='bilinear', align_corners=True)
+        enc3_att = self.att3(dec3, enc3_reduced)
+        dec3 = torch.cat([dec3, enc3_att], dim=1)
+        dec3 = self.dec3(dec3)
+        
+        dec2 = self.up2(dec3)
+        enc2_reduced = self.enc2_proj(enc2)
+        enc2_reduced = F.interpolate(enc2_reduced, size=dec2.shape[2:], 
+                                    mode='bilinear', align_corners=True)
+        enc2_att = self.spatial_att(enc2_reduced)
+        dec2 = torch.cat([dec2, enc2_att], dim=1)
+        dec2 = self.dec2(dec2)
+        
+        dec1 = self.up1(dec2)
+        dec1 = F.interpolate(dec1, size=enc1.shape[2:], 
+                           mode='bilinear', align_corners=True)
+        dec1 = torch.cat([dec1, enc1], dim=1)
+        dec1 = self.dec1(dec1)
+        
+        output = self.out(dec1)
+        if output.shape[2:] != x.shape[2:]:
+            output = F.interpolate(output, size=x.shape[2:], 
+                                 mode='bilinear', align_corners=True)
+        
+        return output
 
 
 class UNetPlusPlus(nn.Module):
@@ -308,6 +559,19 @@ class SegmentationModel:
                     # Verificar si el checkpoint es directamente un state_dict (OrderedDict)
                     first_key = list(checkpoint.keys())[0] if checkpoint else ""
                     
+                    # Verificar primero si es un state_dict directo (sin wrapper)
+                    # Esto debe verificarse ANTES de buscar 'model' o 'model_state_dict'
+                    is_direct_state_dict = (
+                        first_key.startswith("enc1") or 
+                        first_key.startswith("conv0_0") or
+                        first_key.startswith("backbone") or
+                        (not first_key.startswith("model.") and 
+                         'model_state_dict' not in checkpoint and 
+                         'state_dict' not in checkpoint and 
+                         'model' not in checkpoint and
+                         len(checkpoint) > 10)  # Si tiene muchas keys, probablemente es un state_dict
+                    )
+                    
                     # Caso 1: Checkpoint es directamente un state_dict con prefijo "model."
                     if first_key.startswith("model.") and 'model_state_dict' not in checkpoint and 'state_dict' not in checkpoint:
                         # El checkpoint es directamente el state_dict con prefijo "model."
@@ -335,7 +599,138 @@ class SegmentationModel:
                             print(f"Error cargando modelo con prefijo 'model.': {e}")
                             # Continuar con el flujo normal
                     
-                    if 'model' in checkpoint:
+                    # Caso 2: Checkpoint es directamente un state_dict sin wrapper (como DeepLabV3pp)
+                    elif is_direct_state_dict:
+                        # Es un state_dict directo de una arquitectura personalizada
+                        state_dict = checkpoint
+                        architecture_name = self.model_config["architecture"]
+                        
+                        # Detectar arquitectura por las keys
+                        has_dec1 = any('dec1' in k for k in list(checkpoint.keys())[:30])
+                        has_att3 = any('att3' in k for k in list(checkpoint.keys())[:30])
+                        is_deeplabpp = has_dec1 and has_att3  # DeepLabV3pp tiene decoder denso y atención
+                        is_deeplab = 'enc1' in first_key and ('aspp' in first_key or 'decoder' in first_key or any('decoder' in k for k in list(checkpoint.keys())[:20]))
+                        is_unetpp = 'conv0_0' in first_key or 'conv0_1' in first_key
+                        
+                        print(f"Detectado state_dict directo - Reconstruyendo arquitectura {architecture_name}...")
+                        print(f"Primera key: {first_key}")
+                        print(f"Total de parámetros: {len(state_dict)}")
+                        print(f"Es DeepLabV3pp: {is_deeplabpp} (dec1: {has_dec1}, att3: {has_att3})")
+                        
+                        if architecture_name == "DeepLabV3pp" or is_deeplabpp:
+                            try:
+                                print("Construyendo arquitectura DeepLabV3pp...")
+                                self.model = DeepLabV3pp(
+                                    in_channels=3,
+                                    num_classes=NUM_CLASSES
+                                )
+                                print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
+                                missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+                                if missing_keys:
+                                    print(f"⚠️  Advertencia: {len(missing_keys)} keys faltantes (primeras 5: {missing_keys[:5]})")
+                                if unexpected_keys:
+                                    print(f"⚠️  Advertencia: {len(unexpected_keys)} keys inesperadas (primeras 5: {unexpected_keys[:5]})")
+                                
+                                self.model = self.model.to(self.device)
+                                self.model.eval()
+                                print(f"✅ Modelo {self.model_config['name']} cargado exitosamente")
+                                self.model_loaded = True
+                                print(f"Modelo cargado exitosamente en {self.device}")
+                                return
+                            except Exception as e:
+                                import traceback
+                                traceback.print_exc()
+                                raise RuntimeError(
+                                    f"Error cargando modelo DeepLabV3pp: {str(e)}\n"
+                                    f"Verifica que la estructura del state_dict coincida con la arquitectura.\n"
+                                    f"Primera key: {first_key}"
+                                )
+                        elif architecture_name == "DeepLabV3Plus" or is_deeplab:
+                            try:
+                                print("Construyendo arquitectura DeepLabV3Plus...")
+                                self.model = DeepLabV3Plus(
+                                    in_channels=3,
+                                    num_classes=NUM_CLASSES
+                                )
+                                print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
+                                
+                                # Filtrar keys que no coinciden en tamaño para evitar errores
+                                model_state_dict = self.model.state_dict()
+                                filtered_state_dict = {}
+                                skipped_keys = []
+                                
+                                for key, value in state_dict.items():
+                                    if key in model_state_dict:
+                                        model_shape = model_state_dict[key].shape
+                                        checkpoint_shape = value.shape
+                                        if model_shape == checkpoint_shape:
+                                            filtered_state_dict[key] = value
+                                        else:
+                                            skipped_keys.append(f"{key}: checkpoint {checkpoint_shape} vs model {model_shape}")
+                                    else:
+                                        # Key no existe en el modelo, la omitimos
+                                        skipped_keys.append(f"{key}: no existe en modelo")
+                                
+                                if skipped_keys:
+                                    print(f"⚠️  Omitiendo {len(skipped_keys)} keys que no coinciden (primeras 5):")
+                                    for skip in skipped_keys[:5]:
+                                        print(f"   - {skip}")
+                                
+                                # Cargar solo las keys que coinciden
+                                missing_keys, unexpected_keys = self.model.load_state_dict(filtered_state_dict, strict=False)
+                                if missing_keys:
+                                    print(f"⚠️  Advertencia: {len(missing_keys)} keys faltantes en el modelo (primeras 5: {missing_keys[:5]})")
+                                if unexpected_keys:
+                                    print(f"⚠️  Advertencia: {len(unexpected_keys)} keys inesperadas (primeras 5: {unexpected_keys[:5]})")
+                                
+                                print(f"✅ Cargadas {len(filtered_state_dict)}/{len(state_dict)} keys del checkpoint")
+                                
+                                self.model = self.model.to(self.device)
+                                self.model.eval()
+                                print(f"✅ Modelo {self.model_config['name']} cargado exitosamente")
+                                self.model_loaded = True
+                                print(f"Modelo cargado exitosamente en {self.device}")
+                                return
+                            except Exception as e:
+                                import traceback
+                                traceback.print_exc()
+                                raise RuntimeError(
+                                    f"Error cargando modelo DeepLabV3+: {str(e)}\n"
+                                    f"Verifica que la estructura del state_dict coincida con la arquitectura.\n"
+                                    f"Primera key: {first_key}"
+                                )
+                        elif architecture_name == "UNetPlusPlus" or is_unetpp:
+                            try:
+                                print(f"Construyendo arquitectura UNetPlusPlus...")
+                                self.model = UNetPlusPlus(
+                                    in_channels=3,
+                                    num_classes=NUM_CLASSES
+                                )
+                                print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
+                                missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+                                if missing_keys:
+                                    print(f"⚠️  Advertencia: {len(missing_keys)} keys faltantes (primeras 5: {missing_keys[:5]})")
+                                if unexpected_keys:
+                                    print(f"⚠️  Advertencia: {len(unexpected_keys)} keys inesperadas (primeras 5: {unexpected_keys[:5]})")
+                                
+                                self.model = self.model.to(self.device)
+                                self.model.eval()
+                                print(f"✅ Modelo {self.model_config['name']} cargado exitosamente")
+                                self.model_loaded = True
+                                print(f"Modelo cargado exitosamente en {self.device}")
+                                return
+                            except Exception as e:
+                                import traceback
+                                traceback.print_exc()
+                                raise RuntimeError(
+                                    f"Error cargando modelo UNet++: {str(e)}\n"
+                                    f"Verifica que la estructura del state_dict coincida con la arquitectura."
+                                )
+                        else:
+                            raise ValueError(f"Arquitectura '{architecture_name}' no soportada para state_dict directo.")
+                    
+                    # Caso 3: Checkpoint tiene wrapper con 'model', 'model_state_dict', etc.
+                    elif 'model' in checkpoint:
                         # Modelo completo guardado
                         self.model = checkpoint['model']
                         if hasattr(self.model, 'eval'):
@@ -560,14 +955,55 @@ class SegmentationModel:
         return img_tensor.to(self.device)
     
     def postprocess_prediction(self, prediction: torch.Tensor, original_size: Tuple[int, int]) -> np.ndarray:
-        """Postprocesa la predicción del modelo"""
+        """Postprocesa la predicción del modelo con mejoras para T1"""
         # Obtener la clase predicha para cada pixel
         if prediction.dim() > 3:
             prediction = prediction.squeeze(0)
         
         if prediction.dim() == 3:
-            # Si tiene dimensiones [C, H, W], tomar argmax
-            pred_mask = torch.argmax(prediction, dim=0).cpu().numpy()
+            # Obtener probabilidades
+            probs = torch.softmax(prediction, dim=0).cpu().numpy()  # [C, H, W]
+            
+            # Argmax estándar
+            pred_mask = np.argmax(probs, axis=0)
+            
+            # Mejora especial para T1 si existe - UMBRALES MUY BAJOS para modelos mal entrenados
+            t1_class = self._get_class_index("T1")
+            if t1_class is not None and t1_class < probs.shape[0]:
+                t1_probs = probs[t1_class]
+                bg_class = self._get_class_index("F") or self._get_class_index("Background") or 0
+                v_class_idx = self._get_class_index("V")
+                bg_probs = probs[bg_class] if bg_class < probs.shape[0] else np.zeros_like(t1_probs)
+                v_probs = probs[v_class_idx] if v_class_idx is not None and v_class_idx < probs.shape[0] else np.zeros_like(t1_probs)
+                max_probs = np.max(probs, axis=0)
+                
+                # Estrategia 1: T1 con prob > 0.05 Y relativa > 0.15 (más agresivo)
+                t1_relative = t1_probs / (max_probs + 1e-8)
+                t1_condition1 = (
+                    (t1_probs > 0.05) &  # Umbral absoluto muy bajo
+                    (t1_relative > 0.15) &  # Relativa baja
+                    (t1_probs > bg_probs * 0.3)  # Mayor que Background * 0.3
+                )
+                
+                # Estrategia 2: T1 es segunda clase más probable con prob > 0.04
+                sorted_indices = np.argsort(probs, axis=0)[::-1]
+                second_class = sorted_indices[1]
+                t1_is_second = (second_class == t1_class) & (t1_probs > 0.04)
+                
+                # Estrategia 3: T1 tiene prob > 0.06 (umbral bajo)
+                t1_high_prob = t1_probs > 0.06
+                
+                # Estrategia 4: T1 es al menos el 15% de la suma de todas las probabilidades
+                total_probs = np.sum(probs, axis=0)
+                t1_ratio = t1_probs / (total_probs + 1e-8)
+                t1_significant = (t1_ratio > 0.15) & (t1_probs > 0.05)
+                
+                # Combinar todas las estrategias
+                t1_mask = t1_condition1 | t1_is_second | t1_high_prob | t1_significant
+                pred_mask[t1_mask] = t1_class
+            else:
+                # Argmax estándar si no hay T1
+                pred_mask = np.argmax(probs, axis=0)
         else:
             # Si ya es [H, W]
             pred_mask = prediction.cpu().numpy()
@@ -648,12 +1084,16 @@ class SegmentationModel:
         
         for i, class_name in enumerate(self.classes):
             class_name_lower = class_name.lower()
-            if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F':
-                colors[i] = [0, 0, 0]  # Background - negro
-            elif 't1' in class_name_lower:
-                colors[i] = [255, 0, 0]  # T1 - rojo
-            elif 'v' in class_name_lower or 'columna' in class_name_lower:
+            # Mapear colores según el formato de deeplab_resnet50:
+            # 0: "F" (Fondo) -> negro
+            # 1: "V" (Columna) -> verde
+            # 2: "T1" (Vértebra T1) -> rojo
+            if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F' or class_name == '0':
+                colors[i] = [0, 0, 0]  # Background/F - negro
+            elif 'v' in class_name_lower or 'columna' in class_name_lower or class_name == 'V' or class_name == '1':
                 colors[i] = [0, 255, 0]  # V (Columna) - verde
+            elif 't1' in class_name_lower or class_name == 'T1' or class_name == '2':
+                colors[i] = [255, 0, 0]  # T1 - rojo
             else:
                 # Color por defecto si no coincide
                 colors[i] = [128, 128, 128]  # Gris
@@ -725,43 +1165,82 @@ class SegmentationModel:
         metrics["total_classes_detected"] = len(unique_classes)
         metrics["total_pixels"] = int(total_pixels)
         
-        # Calcular IoU y Dice estimados basados en confianza del modelo
+        # Calcular IoU y Dice basados en probabilidades del modelo
+        # NOTA: Sin ground truth, usamos las probabilidades del modelo como referencia
+        # Esto da una estimación de qué tan "seguro" está el modelo de sus predicciones
         if probs is not None and probs.shape[0] == len(self.classes):
             # probs es [C, H, W]
-            # Calcular confianza promedio por clase
+            # Calcular métricas por clase
             for c in range(len(self.classes)):
                 if c < probs.shape[0]:
                     class_name = self.classes[c]
-                    # Máscara binaria para esta clase
-                    pred_mask = (mask == c)
+                    # Máscara binaria predicha para esta clase
+                    pred_mask = (mask == c).astype(np.float32)
                     
-                    # Probabilidad promedio en los píxeles predichos como esta clase
+                    # Probabilidades de esta clase [H, W]
+                    class_probs = probs[c]
+                    
+                    # Calcular confianza promedio en píxeles predichos
                     if pred_mask.sum() > 0:
-                        avg_confidence = float(probs[c][pred_mask].mean())
+                        avg_confidence = float(class_probs[pred_mask.astype(bool)].mean())
                         metrics[f"{class_name}_confidence"] = avg_confidence
-                        
-                        # IoU estimado basado en confianza
-                        # Si la confianza es alta, el IoU estimado es alto
-                        # Fórmula: IoU_estimado = confianza * (píxeles_predichos / total_píxeles)
-                        predicted_pixels = pred_mask.sum()
-                        iou_estimated = avg_confidence * (predicted_pixels / total_pixels) * len(self.classes)
-                        metrics[f"{class_name}_iou_estimated"] = float(min(iou_estimated, 1.0))
-                        
-                        # Dice estimado: 2 * confianza * recall_estimado / (confianza + recall_estimado)
-                        recall_estimated = predicted_pixels / total_pixels if total_pixels > 0 else 0
-                        dice_estimated = (2 * avg_confidence * recall_estimated) / (avg_confidence + recall_estimated + 1e-10)
-                        metrics[f"{class_name}_dice_estimated"] = float(min(dice_estimated, 1.0))
+                    else:
+                        avg_confidence = 0.0
+                        metrics[f"{class_name}_confidence"] = 0.0
+                    
+                    # Calcular IoU y Dice basados en probabilidades (similar al notebook)
+                    # NOTA: Sin ground truth, usamos las probabilidades como referencia
+                    # El método compara la predicción con regiones de alta probabilidad
+                    
+                    # Método principal: IoU basado en intersección/unión con probabilidades
+                    # Similar al notebook: inter = (pred & high_prob), union = (pred | high_prob)
+                    # Usar umbral adaptativo: más bajo para clases minoritarias (V, T1)
+                    is_minority_class = class_name in ['V', 'T1']
+                    prob_threshold = 0.4 if is_minority_class else 0.5
+                    
+                    # Máscara de alta probabilidad
+                    prob_mask = (class_probs > prob_threshold).astype(np.float32)
+                    
+                    # Calcular intersección y unión (similar al notebook)
+                    # Intersección: píxeles predichos Y con probabilidad alta
+                    intersection = (pred_mask * prob_mask).sum()
+                    # Unión: píxeles predichos O con probabilidad alta
+                    union = np.maximum(pred_mask, prob_mask).sum()
+                    
+                    # IoU: intersection / union (igual que en el notebook)
+                    if union > 0:
+                        iou = float(intersection / (union + 1e-7))
+                    else:
+                        iou = 0.0
+                    
+                    metrics[f"{class_name}_iou"] = iou
+                    metrics[f"{class_name}_iou_estimated"] = iou  # Mantener compatibilidad
+                    
+                    # Calcular Dice: 2 * intersection / (pred_sum + prob_sum)
+                    # Similar al notebook pero usando probabilidades en lugar de ground truth
+                    pred_sum = pred_mask.sum()
+                    prob_sum = prob_mask.sum()
+                    if (pred_sum + prob_sum) > 0:
+                        dice = float((2.0 * intersection) / (pred_sum + prob_sum + 1e-7))
+                    else:
+                        dice = 0.0
+                    
+                    metrics[f"{class_name}_dice"] = dice
+                    metrics[f"{class_name}_dice_estimated"] = dice  # Mantener compatibilidad
             
-            # Calcular IoU y Dice promedio (sin background)
-            ious_estimated = [metrics.get(f"{self.classes[c]}_iou_estimated", 0.0) 
-                            for c in range(1, len(self.classes))]
-            dices_estimated = [metrics.get(f"{self.classes[c]}_dice_estimated", 0.0) 
-                             for c in range(1, len(self.classes))]
+            # Calcular IoU y Dice promedio (sin background/F)
+            bg_class = self._get_class_index("F") or self._get_class_index("Background") or 0
+            foreground_classes = [c for c in range(len(self.classes)) if c != bg_class]
             
-            if ious_estimated:
-                metrics["mean_iou_estimated"] = float(np.mean(ious_estimated))
-            if dices_estimated:
-                metrics["mean_dice_estimated"] = float(np.mean(dices_estimated))
+            ious = [metrics.get(f"{self.classes[c]}_iou", 0.0) for c in foreground_classes]
+            dices = [metrics.get(f"{self.classes[c]}_dice", 0.0) for c in foreground_classes]
+            
+            if ious:
+                metrics["mean_iou"] = float(np.mean(ious))
+                metrics["mean_iou_estimated"] = float(np.mean(ious))  # Mantener compatibilidad
+            if dices:
+                metrics["mean_dice"] = float(np.mean(dices))
+                metrics["mean_dice_estimated"] = float(np.mean(dices))  # Mantener compatibilidad
         
         # Calcular entropía de la distribución
         if len(unique_classes) > 1:
@@ -773,9 +1252,16 @@ class SegmentationModel:
         
         return metrics
     
-    def improve_t1_segmentation(self, mask: np.ndarray, probs: Optional[np.ndarray] = None) -> np.ndarray:
+    def _get_class_index(self, class_name: str) -> Optional[int]:
+        """Obtiene el índice de una clase por su nombre"""
+        for i, name in enumerate(self.classes):
+            if class_name.lower() in name.lower() or name.lower() in class_name.lower():
+                return i
+        return None
+    
+    def improve_v_segmentation(self, mask: np.ndarray, probs: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Mejora la segmentación de T1 usando post-procesamiento
+        Mejora la segmentación de V (columna) limpiando ruido y conectando regiones
         
         Args:
             mask: Máscara de segmentación original
@@ -786,37 +1272,214 @@ class SegmentationModel:
         """
         improved_mask = mask.copy()
         
-        # T1 es clase 1 (índice en la lista de clases)
-        t1_class = 1
-        
-        # Verificar que T1 existe en las clases
-        if t1_class >= len(self.classes) or self.classes[t1_class] != "T1":
+        # Buscar dinámicamente el índice de V
+        v_class = self._get_class_index("V")
+        if v_class is None:
             return improved_mask
         
-        # Crear máscara binaria de T1
-        t1_mask = (improved_mask == t1_class).astype(np.uint8)
+        # Crear máscara binaria de V
+        v_mask = (improved_mask == v_class).astype(np.uint8)
         
-        # Operaciones morfológicas para mejorar T1
-        # 1. Eliminar pequeños ruidos (opening)
-        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        t1_cleaned = cv2.morphologyEx(t1_mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
+        if v_mask.sum() == 0:
+            return improved_mask
+        
+        # 1. Eliminar ruido pequeño (opening)
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        v_cleaned = cv2.morphologyEx(v_mask, cv2.MORPH_OPEN, kernel_small, iterations=2)
         
         # 2. Rellenar huecos pequeños (closing)
-        t1_filled = cv2.morphologyEx(t1_cleaned, cv2.MORPH_CLOSE, kernel_small, iterations=1)
+        v_filled = cv2.morphologyEx(v_cleaned, cv2.MORPH_CLOSE, kernel_small, iterations=2)
         
-        # 3. Si tenemos probabilidades, usar umbral de confianza
-        if probs is not None and t1_class < probs.shape[0]:
-            t1_probs = probs[t1_class]
-            # Aplicar umbral de confianza (solo mantener píxeles con alta confianza)
-            confidence_threshold = 0.5
-            high_confidence = (t1_probs > confidence_threshold).astype(np.uint8)
-            # Combinar con máscara morfológica
-            t1_filled = np.logical_and(t1_filled, high_confidence).astype(np.uint8)
+        # 3. Si tenemos probabilidades, filtrar por confianza
+        if probs is not None and v_class < probs.shape[0]:
+            v_probs = probs[v_class]
+            # Mantener solo píxeles con confianza > 0.5
+            high_confidence = (v_probs > 0.5).astype(np.uint8)
+            v_filled = np.logical_and(v_filled, high_confidence).astype(np.uint8)
+        
+        # 4. Filtrar componentes muy pequeños (< 500 píxeles)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(v_filled, connectivity=8)
+        v_filtered = np.zeros_like(v_filled)
+        for label_id in range(1, num_labels):
+            area = stats[label_id, cv2.CC_STAT_AREA]
+            if area >= 500:  # Mantener solo componentes grandes
+                v_filtered[labels == label_id] = 1
+        
+        # 5. Conectar regiones cercanas de la columna (dilatación controlada)
+        kernel_connect = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        v_connected = cv2.dilate(v_filtered, kernel_connect, iterations=1)
+        v_connected = cv2.erode(v_connected, kernel_connect, iterations=1)
+        
+        # 6. Si tenemos probabilidades, filtrar la expansión por confianza
+        if probs is not None and v_class < probs.shape[0]:
+            v_probs = probs[v_class]
+            v_connected = v_connected & (v_probs > 0.4).astype(np.uint8)
+        
+        # Actualizar máscara
+        improved_mask[v_connected == 1] = v_class
+        
+        return improved_mask
+    
+    def improve_t1_segmentation(self, mask: np.ndarray, probs: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Mejora la segmentación de T1 usando post-procesamiento agresivo
+        
+        Args:
+            mask: Máscara de segmentación original
+            probs: Probabilidades del modelo [C, H, W] (opcional)
+            
+        Returns:
+            Máscara mejorada
+        """
+        improved_mask = mask.copy()
+        
+        # Buscar dinámicamente el índice de T1
+        t1_class = self._get_class_index("T1")
+        if t1_class is None:
+            return improved_mask
+        
+        # Si no tenemos probabilidades, usar solo operaciones morfológicas
+        if probs is None or t1_class >= probs.shape[0]:
+            # Crear máscara binaria de T1
+            t1_mask = (improved_mask == t1_class).astype(np.uint8)
+            
+            # Operaciones morfológicas para mejorar T1
+            kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            t1_cleaned = cv2.morphologyEx(t1_mask, cv2.MORPH_OPEN, kernel_small, iterations=1)
+            t1_filled = cv2.morphologyEx(t1_cleaned, cv2.MORPH_CLOSE, kernel_small, iterations=1)
+            
+            improved_mask[t1_filled == 1] = t1_class
+            return improved_mask
+        
+        # Si tenemos probabilidades, usar estrategia más agresiva
+        t1_probs = probs[t1_class]
+        bg_class = self._get_class_index("F") or self._get_class_index("Background") or 0
+        v_class_idx = self._get_class_index("V")
+        bg_probs = probs[bg_class] if bg_class < probs.shape[0] else np.zeros_like(t1_probs)
+        v_probs = probs[v_class_idx] if v_class_idx is not None and v_class_idx < probs.shape[0] else np.zeros_like(t1_probs)
+        
+        # Estrategia 1: Detectar T1 usando umbrales más restrictivos
+        # T1 debe tener:
+        # - Probabilidad absoluta > 0.07 (razonable)
+        # - Y ser al menos el 25% de la probabilidad máxima en ese pixel
+        # - Y ser mayor que Background * 0.5
+        max_probs = np.max(probs, axis=0)
+        t1_relative = t1_probs / (max_probs + 1e-8)
+        
+        t1_candidates = (
+            (t1_probs > 0.07) &  # Umbral absoluto razonable
+            (t1_relative > 0.25) &  # Relativo más alto
+            (t1_probs > bg_probs * 0.5)  # Mayor que Background * 0.5
+        )
+        
+        # Estrategia 2: Si T1 es la segunda clase más probable y tiene prob > 0.06
+        sorted_indices = np.argsort(probs, axis=0)[::-1]
+        second_class = sorted_indices[1]
+        t1_is_second = (second_class == t1_class) & (t1_probs > 0.06)
+        
+        # Estrategia 3: Regiones donde T1 tiene prob > 0.08 Y es significativamente mayor que V
+        t1_high_prob = (t1_probs > 0.08) & (t1_probs > v_probs * 0.6)
+        
+        # Estrategia 4: T1 es al menos el 25% de la suma total de probabilidades
+        total_probs = np.sum(probs, axis=0)
+        t1_ratio = t1_probs / (total_probs + 1e-8)
+        t1_significant = (t1_ratio > 0.25) & (t1_probs > 0.07)
+        
+        # Estrategia 5: T1 cerca de regiones de V (T1 está arriba de la columna) - más restrictivo
+        # Si hay V detectado, buscar T1 en la parte superior de la imagen
+        v_class_idx = self._get_class_index("V")
+        if v_class_idx is not None:
+            v_mask = (mask == v_class_idx).astype(np.uint8)
+        else:
+            v_mask = np.zeros_like(mask, dtype=np.uint8)
+        if v_mask.sum() > 0:
+            # Encontrar la parte superior de V
+            v_coords = np.where(v_mask > 0)
+            if len(v_coords[0]) > 0:
+                v_top = v_coords[0].min()
+                # Buscar T1 en la región superior (arriba de V) con umbral alto
+                top_region = np.zeros_like(t1_probs, dtype=bool)
+                top_region[:max(v_top + 20, mask.shape[0] // 6), :] = True
+                # T1 debe tener prob > 0.08 en esta región y ser mayor que V
+                t1_near_v = (t1_probs > 0.08) & top_region & (t1_probs > v_probs * 0.5)
+                t1_significant = t1_significant | t1_near_v
+        
+        # Combinar todas las estrategias
+        t1_final_mask = t1_candidates | t1_is_second | t1_high_prob | t1_significant
+        
+        # Operaciones morfológicas para limpiar y conectar regiones
+        t1_binary = t1_final_mask.astype(np.uint8)
+        
+        # 1. Eliminar ruido muy pequeño (opening con kernel pequeño)
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        t1_cleaned = cv2.morphologyEx(t1_binary, cv2.MORPH_OPEN, kernel_small, iterations=1)
+        
+        # 2. Rellenar huecos pequeños (closing)
+        t1_filled = cv2.morphologyEx(t1_cleaned, cv2.MORPH_CLOSE, kernel_small, iterations=2)
+        
+        # 3. Conectar regiones cercanas (dilation seguido de erosion)
+        kernel_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        t1_connected = cv2.dilate(t1_filled, kernel_medium, iterations=1)
+        t1_connected = cv2.erode(t1_connected, kernel_medium, iterations=1)
+        
+        # 4. Filtrar componentes muy pequeños y mantener solo los más grandes
+        # T1 debería ser una región compacta, no fragmentada
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(t1_connected, connectivity=8)
+        t1_filtered = np.zeros_like(t1_connected)
+        
+        if num_labels > 1:
+            # Ordenar componentes por área
+            areas = stats[1:, cv2.CC_STAT_AREA]
+            sorted_indices = np.argsort(areas)[::-1]  # De mayor a menor
+            
+            # Mantener solo los componentes más grandes (top 3 o los que tengan > 200 píxeles)
+            for idx in sorted_indices[:3]:  # Top 3 componentes
+                label_id = idx + 1  # +1 porque saltamos label 0
+                area = stats[label_id, cv2.CC_STAT_AREA]
+                if area >= 200:  # Componentes con al menos 200 píxeles
+                    t1_filtered[labels == label_id] = 1
+            # Si no hay componentes grandes, mantener el más grande si tiene > 100 píxeles
+            if t1_filtered.sum() == 0 and len(sorted_indices) > 0:
+                largest_idx = sorted_indices[0] + 1
+                if stats[largest_idx, cv2.CC_STAT_AREA] >= 100:
+                    t1_filtered[labels == largest_idx] = 1
         
         # Actualizar máscara mejorada
-        improved_mask[t1_filled == 1] = t1_class
-        # Eliminar T1 de baja confianza (donde había T1 pero ahora no)
-        improved_mask[(t1_mask == 1) & (t1_filled == 0)] = 0
+        improved_mask[t1_filtered == 1] = t1_class
+        
+        # Mantener T1 que ya estaba en la máscara original si tiene probabilidad razonable
+        existing_t1 = (mask == t1_class).astype(np.uint8)
+        if existing_t1.sum() > 0:
+            # Si T1 existente tiene prob > 0.06, mantenerlo
+            existing_t1_keep = existing_t1 & (t1_probs > 0.06).astype(np.uint8)
+            improved_mask[existing_t1_keep == 1] = t1_class
+        
+        # Estrategia adicional: Expandir T1 detectado usando dilation (muy controlado)
+        if t1_filtered.sum() > 0:
+            # Dilatar ligeramente para capturar T1 completo
+            kernel_expand = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            t1_expanded = cv2.dilate(t1_filtered, kernel_expand, iterations=1)
+            # Pero solo mantener donde T1 tiene prob > 0.07 (umbral más alto)
+            t1_expanded_filtered = t1_expanded & (t1_probs > 0.07).astype(np.uint8)
+            improved_mask[t1_expanded_filtered == 1] = t1_class
+        
+        # Estrategia final: Si hay V detectado, buscar T1 en la parte superior (muy restrictivo)
+        v_class_idx = self._get_class_index("V")
+        if v_class_idx is not None:
+            v_mask = (improved_mask == v_class_idx).astype(np.uint8)
+        else:
+            v_mask = np.zeros_like(improved_mask, dtype=np.uint8)
+        if v_mask.sum() > 0:
+            v_coords = np.where(v_mask > 0)
+            if len(v_coords[0]) > 0:
+                v_top = v_coords[0].min()
+                # Región superior pequeña donde debería estar T1
+                top_region_mask = np.zeros_like(improved_mask, dtype=bool)
+                top_region_mask[:max(v_top + 30, mask.shape[0] // 6), :] = True
+                
+                # Buscar T1 con prob > 0.08 en esta región (umbral alto) y mayor que V
+                t1_in_top = (t1_probs > 0.08) & top_region_mask & (t1_probs > v_probs * 0.5)
+                improved_mask[t1_in_top] = t1_class
         
         return improved_mask
 

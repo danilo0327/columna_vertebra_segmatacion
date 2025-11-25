@@ -124,8 +124,11 @@ async def segment_image(
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=error_msg)
         
-        # Mejorar segmentación de T1
-        mask_improved = model.improve_t1_segmentation(mask, probs)
+        # Mejorar segmentación de V (columna) primero
+        mask_improved = model.improve_v_segmentation(mask, probs)
+        
+        # Luego mejorar segmentación de T1
+        mask_improved = model.improve_t1_segmentation(mask_improved, probs)
         
         # Calcular métricas (con probabilidades para IoU/Dice estimados)
         metrics = model.calculate_metrics(mask_improved, probs)
