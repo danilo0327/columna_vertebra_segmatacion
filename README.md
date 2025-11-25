@@ -26,6 +26,207 @@ Aplicación web para segmentación automática de columna vertebral (V) y vérte
   - Selección de modelo desde la interfaz
   - Botón para limpiar y cargar nueva imagen
 
+## 🧠 Arquitectura del Modelo DeepLabV3+ ResNet50
+
+El modelo principal utilizado es **DeepLabV3+ con backbone ResNet50**, una arquitectura de segmentación semántica de última generación que combina un encoder profundo con un decoder refinado.
+
+### Estructura de la Arquitectura
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        ENCODER                                │
+│  ┌──────────────┐                                            │
+│  │ Input Image  │ → ResNet-50 Backbone                        │
+│  │ (512×256×3)  │                                            │
+│  └──────────────┘                                            │
+│         │                                                     │
+│         ├─→ L_e: High-level features (conv4_block6_2_relu)   │
+│         │   └─→ Atrous Spatial Pyramid Pooling (ASPP)       │
+│         │       ├─ 1×1 Convolution                           │
+│         │       ├─ 3×3 Convolution (rate=6)                  │
+│         │       ├─ 3×3 Convolution (rate=12)                 │
+│         │       ├─ 3×3 Convolution (rate=18)                  │
+│         │       ├─ Image Pooling                              │
+│         │       └─ Concatenation → 1×1 Conv (ASPP Output)    │
+│         │                                                      │
+│         └─→ L_d: Low-level features (conv2_block3_2_relu)     │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                        DECODER                               │
+│  ┌──────────────────┐                                       │
+│  │ ASPP Output      │ → Upsample by 4                       │
+│  └──────────────────┘                                       │
+│         │                                                     │
+│         │                                                     │
+│  ┌──────────────────┐                                       │
+│  │ L_d Features     │ → 1×1 Conv                            │
+│  └──────────────────┘                                       │
+│         │                                                     │
+│         └─→ Concatenation                                    │
+│             └─→ 3×3 Convolution                              │
+│                 └─→ Upsample by 4                            │
+│                     └─→ Segmentation Mask (512×256×3)         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Componentes Principales
+
+#### 1. **Encoder: ResNet-50 Backbone**
+- **Función:** Extracción de características multiescala
+- **Salidas:**
+  - **L_e (High-level):** Características de alto nivel desde `conv4_block6_2_relu`
+  - **L_d (Low-level):** Características de bajo nivel desde `conv2_block3_2_relu`
+
+#### 2. **Atrous Spatial Pyramid Pooling (ASPP)**
+- **Propósito:** Capturar contexto a múltiples escalas usando convoluciones atrous (dilated)
+- **Componentes:**
+  - 1×1 Convolución estándar
+  - 3×3 Convoluciones atrous con tasas 6, 12 y 18
+  - Image Pooling (Adaptive Average Pooling)
+  - Concatenación y proyección final con 1×1 convolución
+
+#### 3. **Decoder**
+- **Función:** Refinamiento de la segmentación usando características de bajo nivel
+- **Proceso:**
+  1. Upsampling del output de ASPP (×4)
+  2. Procesamiento de características de bajo nivel (L_d) con 1×1 convolución
+  3. Concatenación de características de alto y bajo nivel
+  4. Refinamiento con 3×3 convolución
+  5. Upsampling final (×4) para obtener la máscara de segmentación
+
+### Ventajas de esta Arquitectura
+
+- **Contexto multiescala:** ASPP captura información a diferentes escalas espaciales
+- **Refinamiento preciso:** El decoder combina características de alto y bajo nivel para bordes más precisos
+- **Eficiencia:** ResNet-50 proporciona un buen balance entre precisión y velocidad
+
+## 🎓 Configuración del Entrenamiento
+
+El modelo DeepLabV3+ ResNet50 fue entrenado con la siguiente configuración:
+
+### Dataset
+
+- **Total de imágenes:** 174 radiografías válidas
+- **Anotaciones:** 499 anotaciones en formato COCO
+- **Split:**
+  - **Train:** 70% (121 imágenes)
+  - **Validation:** 15% (26 imágenes)
+  - **Test:** 15% (27 imágenes)
+- **Tamaño de imagen:** 512×256 píxeles
+- **Clases:** 3 clases (F=Fondo, V=Columna, T1=Vértebra T1)
+
+### Preprocesamiento
+
+- **Resize:** Todas las imágenes se redimensionan a 512×256
+- **Normalización:** Valores de píxel normalizados a [0, 1]
+- **Data Augmentation:**
+  - Random horizontal flip (50% probabilidad)
+  - Interpolación: `INTER_AREA` para imágenes, `INTER_NEAREST` para máscaras
+
+### Hiperparámetros
+
+| Parámetro | Valor |
+|-----------|-------|
+| **Batch Size** | 4 |
+| **Epochs** | 50 |
+| **Learning Rate** | 3×10⁻⁴ (0.0003) |
+| **Optimizer** | AdamW |
+| **Weight Decay** | 1×10⁻⁴ |
+| **Scheduler** | CosineAnnealingLR (T_max=50) |
+| **Loss Function** | Combined Loss (CE + Dice) |
+|   - CE Weight | 0.6 |
+|   - Dice Weight | 0.4 |
+| **Class Weights** | [0.05, 1.0, 3.0] (F, V, T1) |
+
+### Función de Pérdida
+
+Se utiliza una **pérdida combinada** que combina Cross-Entropy y Dice Loss:
+
+```python
+Loss = 0.6 × CrossEntropy + 0.4 × DiceLoss
+```
+
+- **Cross-Entropy:** Penaliza errores de clasificación
+- **Dice Loss:** Enfocado en la superposición de regiones (útil para clases desbalanceadas)
+- **Class Weights:** Pesos ajustados para manejar el desbalance (F >> V > T1)
+
+### Métricas de Evaluación
+
+- **IoU (Intersection over Union)** por clase
+- **mIoU (mean IoU)** excluyendo fondo
+- **Modelo guardado:** Se guarda el modelo con mejor IoU de T1 en validación
+
+### Resultados del Entrenamiento
+
+El modelo alcanzó los siguientes resultados en validación (mejor época):
+
+- **mIoU (sin fondo):** ~0.66
+- **IoU por clase:**
+  - F (Fondo): ~0.97
+  - V (Columna): ~0.65
+  - T1 (Vértebra): ~0.66
+
+## 📊 Ejemplo de Inferencia
+
+A continuación se muestra un ejemplo de los resultados obtenidos con el modelo DeepLabV3+ ResNet50:
+
+### Resultados Visuales
+
+El modelo genera tres visualizaciones:
+
+1. **Imagen Original:** La radiografía de entrada en escala de grises
+2. **Máscara de Segmentación:** La máscara binaria con las clases segmentadas
+   - Fondo en negro
+   - Columna vertebral (V) en gris oscuro
+   - Vértebra T1 en gris claro
+3. **Superposición:** Combinación de la imagen original con la segmentación
+   - **Columna vertebral (V):** Resaltada en **verde**
+   - **Vértebra T1:** Resaltada en **rojo**
+
+### Métricas de Ejemplo
+
+Para una radiografía típica, el modelo genera las siguientes métricas:
+
+#### Métricas Globales
+- **IoU Promedio (Estimado):** 0.8785
+- **Dice Promedio (Estimado):** 0.9330
+- **Cobertura Foreground:** 9.98%
+- **Clases Detectadas:** 3
+
+#### Métricas por Clase
+
+**V (Columna Vertebral):**
+- Porcentaje: 9.54%
+- IoU: 0.9669
+- Dice: 0.9832
+- Confianza: 0.9522
+
+**T1 (Vértebra T1):**
+- Porcentaje: 0.44%
+- IoU: 0.7901
+- Dice: 0.8828
+- Confianza: 0.7462
+
+**F (Fondo):**
+- Porcentaje: 90.02%
+- IoU: 0.9975
+- Dice: 0.9987
+- Confianza: 0.9885
+
+#### Promedio (mean)
+- IoU: 0.8785
+- Dice: 0.9330
+
+### Interpretación
+
+- **Alto IoU y Dice para V:** El modelo segmenta la columna vertebral con alta precisión (IoU > 0.96)
+- **Buen rendimiento en T1:** A pesar de ser una clase minoritaria, el modelo logra un IoU de ~0.79 para T1
+- **Fondo bien identificado:** El fondo se segmenta casi perfectamente (IoU > 0.99)
+- **Cobertura realista:** El 9.98% de cobertura foreground refleja la proporción real de la columna y T1 en las radiografías
+
 ## 🏗️ Estructura del Proyecto
 
 ```
