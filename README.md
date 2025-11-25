@@ -251,10 +251,21 @@ columna_vertebra_segmatacion/
 │   └── deeplab_resnet50/    # DeepLabV3+ ResNet50
 ├── notebooks/               # Jupyter notebooks de entrenamiento
 ├── scripts/                 # Scripts de utilidad
+│   ├── diagnosticos/       # Scripts de diagnóstico
+│   │   ├── analyze_deeplab_hybrid.py
+│   │   ├── diagnostico_t1.py
+│   │   └── diagnostico_t1_dense_decoder.py
+│   ├── tests/              # Scripts de prueba
+│   │   ├── test_classes.py
+│   │   ├── test_improvements.py
+│   │   ├── test_metrics_calculation.py
+│   │   ├── test_model_loading.py
+│   │   ├── test_new_model.py
+│   │   └── test_t1_improvement.py
 │   ├── extract_model.py
-│   ├── setup_ec2.sh
-│   ├── test_*.py
-│   └── ...
+│   ├── inspect_model.py
+│   ├── run_server.py
+│   └── setup_ec2.sh
 ├── Dockerfile               # Configuración Docker
 ├── docker-compose.yml       # Orquestación Docker (opcional)
 ├── install_dependencies.bat # Instalación Windows
@@ -262,7 +273,11 @@ columna_vertebra_segmatacion/
 ├── start.bat               # Inicio Windows
 ├── start.sh                 # Inicio Linux/Mac
 ├── iniciar_servidor.ps1     # Inicio PowerShell
-├── GUIA_DESPLIEGUE_EC2.md  # Guía detallada EC2
+├── docs/                   # Documentación y guías
+│   ├── GUIA_DESPLIEGUE_EC2.md
+│   ├── INSTALACION.md
+│   ├── NOTAS_MODELO.md
+│   └── SOLUCION_PROBLEMAS_UNET.md
 └── README.md               # Este archivo
 ```
 
@@ -925,7 +940,18 @@ Verifica el estado de la API y modelos.
 }
 ```
 
+## 📚 Documentación Adicional
+
+Toda la documentación detallada está disponible en la carpeta [`docs/`](docs/):
+
+- **[Guía de Despliegue EC2](docs/GUIA_DESPLIEGUE_EC2.md)** - Guía completa paso a paso para AWS EC2
+- **[Guía de Instalación](docs/INSTALACION.md)** - Instrucciones detalladas de instalación
+- **[Solución de Problemas](docs/SOLUCION_PROBLEMAS_UNET.md)** - Troubleshooting común
+- **[Notas del Modelo](docs/NOTAS_MODELO.md)** - Notas técnicas sobre modelos
+
 ## 🐛 Solución de Problemas
+
+> 💡 **Más ayuda:** Consulta [docs/SOLUCION_PROBLEMAS_UNET.md](docs/SOLUCION_PROBLEMAS_UNET.md) para problemas específicos con modelos U-Net++
 
 ### Error: "No module named 'torch._C'"
 
