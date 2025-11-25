@@ -1177,8 +1177,15 @@ class SegmentationModel:
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # Redimensionar
-        image = image.resize(INPUT_SIZE, Image.Resampling.BILINEAR)
+        # Ajustar tamaño según el modelo (algunos modelos fueron entrenados con 256x256)
+        if self.model_config.get("architecture") == "DeepLabV3PlusDenseDecoder":
+            # Este modelo fue entrenado con 256x256 según el JSON de clases
+            input_size = (256, 256)
+        else:
+            input_size = INPUT_SIZE
+        
+        # Redimensionar al tamaño de entrada del modelo
+        image = image.resize(input_size, Image.Resampling.BILINEAR)
         
         # Convertir a numpy array y normalizar
         img_array = np.array(image).astype(np.float32) / 255.0
@@ -1211,26 +1218,46 @@ class SegmentationModel:
                 v_probs = probs[v_class_idx] if v_class_idx is not None and v_class_idx < probs.shape[0] else np.zeros_like(t1_probs)
                 max_probs = np.max(probs, axis=0)
                 
-                # Estrategia 1: T1 con prob > 0.05 Y relativa > 0.15 (más agresivo)
+                # Estrategia 1: T1 con prob > umbral MUY bajo (adaptativo según modelo)
+                # Para modelos con probabilidades muy bajas de T1, usar umbrales extremadamente bajos
                 t1_relative = t1_probs / (max_probs + 1e-8)
+                
+                # Detectar si el modelo tiene probabilidades muy bajas de T1
+                t1_max_prob = t1_probs.max()
+                if t1_max_prob < 0.01:  # Si la prob máxima de T1 es < 1%, usar umbrales muy bajos
+                    t1_abs_threshold = 0.0005  # 0.05%
+                    t1_rel_threshold = 0.05  # 5% relativo
+                    t1_bg_factor = 0.01  # 1% de background
+                elif t1_max_prob < 0.05:  # Si la prob máxima es < 5%, usar umbrales bajos
+                    t1_abs_threshold = 0.002  # 0.2%
+                    t1_rel_threshold = 0.08  # 8% relativo
+                    t1_bg_factor = 0.05  # 5% de background
+                else:  # Umbrales normales
+                    t1_abs_threshold = 0.05  # 5%
+                    t1_rel_threshold = 0.15  # 15% relativo
+                    t1_bg_factor = 0.3  # 30% de background
+                
                 t1_condition1 = (
-                    (t1_probs > 0.05) &  # Umbral absoluto muy bajo
-                    (t1_relative > 0.15) &  # Relativa baja
-                    (t1_probs > bg_probs * 0.3)  # Mayor que Background * 0.3
+                    (t1_probs > t1_abs_threshold) &  # Umbral absoluto adaptativo
+                    (t1_relative > t1_rel_threshold) &  # Relativa adaptativa
+                    (t1_probs > bg_probs * t1_bg_factor)  # Mayor que Background * factor
                 )
                 
-                # Estrategia 2: T1 es segunda clase más probable con prob > 0.04
+                # Estrategia 2: T1 es segunda clase más probable con prob > umbral adaptativo
                 sorted_indices = np.argsort(probs, axis=0)[::-1]
                 second_class = sorted_indices[1]
-                t1_is_second = (second_class == t1_class) & (t1_probs > 0.04)
+                t1_second_threshold = max(0.0003, t1_abs_threshold * 0.6)  # 60% del umbral absoluto
+                t1_is_second = (second_class == t1_class) & (t1_probs > t1_second_threshold)
                 
-                # Estrategia 3: T1 tiene prob > 0.06 (umbral bajo)
-                t1_high_prob = t1_probs > 0.06
+                # Estrategia 3: T1 tiene prob > umbral adaptativo
+                t1_high_threshold = max(0.0005, t1_abs_threshold * 1.2)  # 20% más que el umbral absoluto
+                t1_high_prob = t1_probs > t1_high_threshold
                 
-                # Estrategia 4: T1 es al menos el 15% de la suma de todas las probabilidades
+                # Estrategia 4: T1 es al menos un porcentaje de la suma de todas las probabilidades
                 total_probs = np.sum(probs, axis=0)
                 t1_ratio = t1_probs / (total_probs + 1e-8)
-                t1_significant = (t1_ratio > 0.15) & (t1_probs > 0.05)
+                t1_ratio_threshold = max(0.05, t1_rel_threshold * 0.5)  # 50% del umbral relativo
+                t1_significant = (t1_ratio > t1_ratio_threshold) & (t1_probs > t1_abs_threshold)
                 
                 # Combinar todas las estrategias
                 t1_mask = t1_condition1 | t1_is_second | t1_high_prob | t1_significant
@@ -1592,32 +1619,50 @@ class SegmentationModel:
         bg_probs = probs[bg_class] if bg_class < probs.shape[0] else np.zeros_like(t1_probs)
         v_probs = probs[v_class_idx] if v_class_idx is not None and v_class_idx < probs.shape[0] else np.zeros_like(t1_probs)
         
-        # Estrategia 1: Detectar T1 usando umbrales más restrictivos
-        # T1 debe tener:
-        # - Probabilidad absoluta > 0.07 (razonable)
-        # - Y ser al menos el 25% de la probabilidad máxima en ese pixel
-        # - Y ser mayor que Background * 0.5
+        # Estrategia 1: Detectar T1 usando umbrales adaptativos
+        # Ajustar umbrales según la probabilidad máxima de T1
         max_probs = np.max(probs, axis=0)
         t1_relative = t1_probs / (max_probs + 1e-8)
         
+        # Detectar si el modelo tiene probabilidades muy bajas de T1
+        t1_max_prob = t1_probs.max()
+        if t1_max_prob < 0.01:  # Si la prob máxima de T1 es < 1%, usar umbrales muy bajos
+            t1_abs_threshold = 0.0005  # 0.05%
+            t1_rel_threshold = 0.05  # 5% relativo
+            t1_bg_factor = 0.01  # 1% de background
+            t1_v_factor = 0.1  # 10% de V
+        elif t1_max_prob < 0.05:  # Si la prob máxima es < 5%, usar umbrales bajos
+            t1_abs_threshold = 0.002  # 0.2%
+            t1_rel_threshold = 0.08  # 8% relativo
+            t1_bg_factor = 0.05  # 5% de background
+            t1_v_factor = 0.3  # 30% de V
+        else:  # Umbrales normales
+            t1_abs_threshold = 0.07  # 7%
+            t1_rel_threshold = 0.25  # 25% relativo
+            t1_bg_factor = 0.5  # 50% de background
+            t1_v_factor = 0.6  # 60% de V
+        
         t1_candidates = (
-            (t1_probs > 0.07) &  # Umbral absoluto razonable
-            (t1_relative > 0.25) &  # Relativo más alto
-            (t1_probs > bg_probs * 0.5)  # Mayor que Background * 0.5
+            (t1_probs > t1_abs_threshold) &  # Umbral absoluto adaptativo
+            (t1_relative > t1_rel_threshold) &  # Relativo adaptativo
+            (t1_probs > bg_probs * t1_bg_factor)  # Mayor que Background * factor
         )
         
-        # Estrategia 2: Si T1 es la segunda clase más probable y tiene prob > 0.06
+        # Estrategia 2: Si T1 es la segunda clase más probable y tiene prob > umbral adaptativo
         sorted_indices = np.argsort(probs, axis=0)[::-1]
         second_class = sorted_indices[1]
-        t1_is_second = (second_class == t1_class) & (t1_probs > 0.06)
+        t1_second_threshold = max(0.0003, t1_abs_threshold * 0.6)  # 60% del umbral absoluto
+        t1_is_second = (second_class == t1_class) & (t1_probs > t1_second_threshold)
         
-        # Estrategia 3: Regiones donde T1 tiene prob > 0.08 Y es significativamente mayor que V
-        t1_high_prob = (t1_probs > 0.08) & (t1_probs > v_probs * 0.6)
+        # Estrategia 3: Regiones donde T1 tiene prob > umbral adaptativo Y es mayor que V
+        t1_high_threshold = max(0.0005, t1_abs_threshold * 1.2)  # 20% más que el umbral absoluto
+        t1_high_prob = (t1_probs > t1_high_threshold) & (t1_probs > v_probs * t1_v_factor)
         
-        # Estrategia 4: T1 es al menos el 25% de la suma total de probabilidades
+        # Estrategia 4: T1 es al menos un porcentaje de la suma total de probabilidades
         total_probs = np.sum(probs, axis=0)
         t1_ratio = t1_probs / (total_probs + 1e-8)
-        t1_significant = (t1_ratio > 0.25) & (t1_probs > 0.07)
+        t1_ratio_threshold = max(0.05, t1_rel_threshold * 0.5)  # 50% del umbral relativo
+        t1_significant = (t1_ratio > t1_ratio_threshold) & (t1_probs > t1_abs_threshold)
         
         # Estrategia 5: T1 cerca de regiones de V (T1 está arriba de la columna) - más restrictivo
         # Si hay V detectado, buscar T1 en la parte superior de la imagen
@@ -1631,11 +1676,12 @@ class SegmentationModel:
             v_coords = np.where(v_mask > 0)
             if len(v_coords[0]) > 0:
                 v_top = v_coords[0].min()
-                # Buscar T1 en la región superior (arriba de V) con umbral alto
+                # Buscar T1 en la región superior (arriba de V) con umbral adaptativo
                 top_region = np.zeros_like(t1_probs, dtype=bool)
                 top_region[:max(v_top + 20, mask.shape[0] // 6), :] = True
-                # T1 debe tener prob > 0.08 en esta región y ser mayor que V
-                t1_near_v = (t1_probs > 0.08) & top_region & (t1_probs > v_probs * 0.5)
+                # T1 debe tener prob > umbral adaptativo en esta región y ser mayor que V
+                t1_near_v_threshold = max(0.0005, t1_abs_threshold * 1.2)  # 20% más que el umbral absoluto
+                t1_near_v = (t1_probs > t1_near_v_threshold) & top_region & (t1_probs > v_probs * t1_v_factor)
                 t1_significant = t1_significant | t1_near_v
         
         # Combinar todas las estrategias
