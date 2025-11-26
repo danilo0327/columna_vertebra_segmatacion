@@ -3,7 +3,7 @@ FROM python:3.10-slim
 
 # Instalar dependencias del sistema
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,8 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar código de la aplicación
 COPY segmentacion_app/ ./segmentacion_app/
-COPY classes_deeplabv3plus.json .
-COPY deeplabv3plus_20251114_040131.zip .
+
+# Copiar modelos (si existen)
+COPY models/ ./models/
 
 # Crear directorios necesarios
 RUN mkdir -p models data segmentacion_app/app/static
