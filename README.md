@@ -6,7 +6,7 @@ Aplicación web para segmentación automática de columna vertebral (V) y vérte
 
 - **Múltiples modelos disponibles:**
   - DeepLabV3++ (Decoder Denso) - Modelo híbrido con decoder denso
-  - U-Net++ v2 - Arquitectura U-Net++ optimizada
+  - U-Net++ Spine T1 - Arquitectura U-Net++ optimizada con segmentación individual de vértebras
   - DeepLabV3+ ResNet50 - Modelo estándar de torchvision
 
 - **Segmentación de múltiples clases:**
@@ -105,31 +105,29 @@ El modelo principal utilizado es **DeepLabV3+ con backbone ResNet50**, una arqui
 
 ## 🎓 Configuración del Entrenamiento
 
-El modelo DeepLabV3+ ResNet50 fue entrenado con la siguiente configuración:
+Los modelos fueron entrenados con las siguientes configuraciones:
 
 ### Dataset
 
 - **Total de imágenes:** 174 radiografías válidas
 - **Anotaciones:** 499 anotaciones en formato COCO
 - **Split:**
-  - **Train:** 70% (121 imágenes)
-  - **Validation:** 15% (26 imágenes)
-  - **Test:** 15% (27 imágenes)
-- **Tamaño de imagen:** 512×256 píxeles
+  - **Train:** 80% (~139 imágenes)
+  - **Validation:** 20% (~35 imágenes)
 - **Clases:** 3 clases (F=Fondo, V=Columna, T1=Vértebra T1)
 
 ### Preprocesamiento
 
-- **Resize:** Todas las imágenes se redimensionan a 512×256
 - **Normalización:** Valores de píxel normalizados a [0, 1]
 - **Data Augmentation:**
   - Random horizontal flip (50% probabilidad)
   - Interpolación: `INTER_AREA` para imágenes, `INTER_NEAREST` para máscaras
 
-### Hiperparámetros
+### Modelo 1: DeepLabV3+ ResNet50
 
 | Parámetro | Valor |
 |-----------|-------|
+| **Tamaño de imagen** | 512×256 píxeles |
 | **Batch Size** | 4 |
 | **Epochs** | 50 |
 | **Learning Rate** | 3×10⁻⁴ (0.0003) |
@@ -141,13 +139,78 @@ El modelo DeepLabV3+ ResNet50 fue entrenado con la siguiente configuración:
 |   - Dice Weight | 0.4 |
 | **Class Weights** | [0.05, 1.0, 3.0] (F, V, T1) |
 
-### Función de Pérdida
-
-Se utiliza una **pérdida combinada** que combina Cross-Entropy y Dice Loss:
-
+**Función de Pérdida:**
 ```python
 Loss = 0.6 × CrossEntropy + 0.4 × DiceLoss
 ```
+
+**Resultados en validación (mejor época):**
+- **mIoU (sin fondo):** ~0.66
+- **IoU por clase:**
+  - F (Fondo): ~0.97
+  - V (Columna): ~0.65
+  - T1 (Vértebra): ~0.66
+
+### Modelo 2: DeepLabV3++ (Decoder Denso)
+
+| Parámetro | Valor |
+|-----------|-------|
+| **Tamaño de imagen** | 256×256 píxeles |
+| **Batch Size** | 4 |
+| **Epochs** | 50 |
+| **Learning Rate** | 3×10⁻⁴ (0.0003) |
+| **Optimizer** | AdamW |
+| **Weight Decay** | 1×10⁻⁴ |
+| **Scheduler** | CosineAnnealingLR (T_max=50) |
+| **Loss Function** | Combined Loss (CE + Dice) |
+|   - CE Weight | 0.6 |
+|   - Dice Weight | 0.4 |
+| **Class Weights** | [0.05, 1.0, 3.0] (F, V, T1) |
+| **Parámetros totales** | ~43.2M |
+
+**Función de Pérdida:**
+```python
+Loss = 0.6 × CrossEntropy + 0.4 × DiceLoss
+```
+
+**Características:**
+- Arquitectura híbrida con ResNet50 backbone
+- Decoder denso de 4 niveles con conexiones densas
+- Módulos de atención en el decoder
+- ASPP con atención de canales
+
+### Modelo 3: U-Net++ Spine T1
+
+| Parámetro | Valor |
+|-----------|-------|
+| **Tamaño de imagen** | 256×256 píxeles |
+| **Batch Size** | 4 |
+| **Epochs** | 100 |
+| **Learning Rate** | 3×10⁻⁴ (0.0003) |
+| **Optimizer** | AdamW |
+| **Weight Decay** | 1×10⁻⁴ |
+| **Scheduler** | CosineAnnealingLR (T_max=100) |
+| **Loss Function** | Combined Loss (CE + Dice) |
+|   - CE Weight | 0.5 |
+|   - Dice Weight | 0.5 |
+| **Class Weights** | [0.05, 1.0, 3.0] (F, V, T1) |
+| **Base Channels** | 32 |
+| **Parámetros totales** | ~9.2M |
+
+**Función de Pérdida:**
+```python
+Loss = 0.5 × CrossEntropy + 0.5 × DiceLoss
+```
+
+**Características:**
+- Arquitectura U-Net++ compacta con base_ch=32
+- Skip connections densas (nested pathways)
+- Visualización especial: cada vértebra segmentada individualmente con colores diferentes
+- Modelo más ligero y eficiente
+
+### Función de Pérdida General
+
+Todos los modelos utilizan una **pérdida combinada** que combina Cross-Entropy y Dice Loss:
 
 - **Cross-Entropy:** Penaliza errores de clasificación
 - **Dice Loss:** Enfocado en la superposición de regiones (útil para clases desbalanceadas)
@@ -157,17 +220,8 @@ Loss = 0.6 × CrossEntropy + 0.4 × DiceLoss
 
 - **IoU (Intersection over Union)** por clase
 - **mIoU (mean IoU)** excluyendo fondo
-- **Modelo guardado:** Se guarda el modelo con mejor IoU de T1 en validación
-
-### Resultados del Entrenamiento
-
-El modelo alcanzó los siguientes resultados en validación (mejor época):
-
-- **mIoU (sin fondo):** ~0.66
-- **IoU por clase:**
-  - F (Fondo): ~0.97
-  - V (Columna): ~0.65
-  - T1 (Vértebra): ~0.66
+- **Dice Score** por clase
+- **Modelo guardado:** Se guarda el modelo con mejor mIoU en validación
 
 ## 📊 Ejemplo de Inferencia
 
@@ -247,7 +301,7 @@ columna_vertebra_segmatacion/
 │   └── requirements.txt      # Dependencias
 ├── models/                   # Modelos entrenados
 │   ├── deeplab_densedecoder/ # DeepLabV3++ (Decoder Denso)
-│   ├── unetplusplus_v2/     # U-Net++ v2
+│   ├── unetplusplus/        # U-Net++ Spine T1
 │   └── deeplab_resnet50/    # DeepLabV3+ ResNet50
 ├── notebooks/               # Jupyter notebooks de entrenamiento
 ├── scripts/                 # Scripts de utilidad
@@ -867,7 +921,7 @@ Los modelos se configuran en `segmentacion_app/app/config.py`:
 ```python
 AVAILABLE_MODELS = {
     "deeplab_dense_decoder": {...},
-    "unetplusplus_v2": {...},
+    "model_unetpp_spine_t1": {...},
     "deeplab_resnet50": {...}
 }
 ```
@@ -891,7 +945,7 @@ Segmenta una imagen de radiografía.
 **Parámetros (multipart/form-data):**
 - `file`: Archivo de imagen (PNG, JPG, JPEG, DICOM)
 - `model_type`: Tipo de modelo (opcional, default: "deeplab_resnet50")
-  - Valores: `"deeplab_dense_decoder"`, `"unetplusplus_v2"`, `"deeplab_resnet50"`
+  - Valores: `"deeplab_dense_decoder"`, `"model_unetpp_spine_t1"`, `"deeplab_resnet50"`
 
 **Respuesta:**
 ```json
@@ -1021,16 +1075,21 @@ uvicorn segmentacion_app.app.main:app --port 8001
 ### DeepLabV3++ (Decoder Denso) - `deeplab_dense_decoder`
 - **Arquitectura:** DeepLabV3+ con decoder denso tipo U-Net++
 - **Características:** ASPP con atención, decoder de 4 capas, módulos de atención
+- **Tamaño de entrada:** 256×256 píxeles
+- **Parámetros:** ~43.2M
 - **Uso:** Balance entre precisión y complejidad
 
-### U-Net++ v2 - `unetplusplus_v2`
-- **Arquitectura:** U-Net++ optimizada
-- **Características:** Skip connections densas, nested pathways
-- **Uso:** Segmentación precisa con arquitectura U-Net
+### U-Net++ Spine T1 - `model_unetpp_spine_t1`
+- **Arquitectura:** U-Net++ optimizada con base_ch=32
+- **Características:** Skip connections densas, nested pathways, segmentación individual de vértebras
+- **Tamaño de entrada:** 256×256 píxeles
+- **Parámetros:** ~9.2M
+- **Uso:** Segmentación precisa con visualización detallada de cada vértebra individualmente
 
 ### DeepLabV3+ ResNet50 - `deeplab_resnet50`
 - **Arquitectura:** DeepLabV3+ estándar de torchvision
 - **Características:** Backbone ResNet50, ASPP estándar
+- **Tamaño de entrada:** 512×256 píxeles
 - **Uso:** Modelo robusto y probado
 
 ## 🔄 Actualizar la Aplicación

@@ -26,11 +26,11 @@ AVAILABLE_MODELS = {
         "classes_file": "deeplab_dense_decoder_classes.json",
         "architecture": "DeepLabV3PlusDenseDecoder"
     },
-    "unetplusplus_v2": {
-        "name": "U-Net++ v2",
-        "model_dir": MODEL_DIR / "unetplusplus_v2",
-        "model_file": "u_netplusplus_best.pth",
-        "classes_file": "classes_unetplusplus_v2.json",
+    "model_unetpp_spine_t1": {
+        "name": "U-Net++ Spine T1",
+        "model_dir": MODEL_DIR / "unetplusplus",
+        "model_file": "model_unetpp_spine_t1.pth",
+        "classes_file": "unetpp_spine_t1_classes.json",
         "architecture": "UNetPlusPlus"
     },
     "deeplab_resnet50": {

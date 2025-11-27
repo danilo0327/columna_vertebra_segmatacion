@@ -28,13 +28,13 @@ from ..config import (
 
 class ConvBlock(nn.Module):
     """Bloque convolucional con BatchNorm y ReLU"""
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, use_bias=True):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=use_bias),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=use_bias),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True)
         )
@@ -591,7 +591,7 @@ class DeepLabV3PlusDenseDecoder(nn.Module):
 
 
 class UNetPlusPlus(nn.Module):
-    """Arquitectura U-Net++ personalizada"""
+    """Arquitectura U-Net++ personalizada (versión antigua)"""
     def __init__(self, in_channels=3, num_classes=3):
         super().__init__()
         self.pool = nn.MaxPool2d(2, 2)
@@ -640,6 +640,130 @@ class UNetPlusPlus(nn.Module):
         x0_4 = self.conv0_4(torch.cat([x0_0, x0_1, x0_2, x0_3, self.up(x1_3)], 1))
         
         return self.out(x0_4)
+
+
+class UNetPP(nn.Module):
+    """
+    Implementación de UNet++ con profundidad 4 y base_ch (nb).
+    Esta es la arquitectura usada en el notebook UNet++.ipynb para model_unetpp_spine_t1.
+    Estructura de canales (nb = base_ch):
+    
+    X0,0: nb
+    X1,0: 2nb
+    X2,0: 4nb
+    X3,0: 8nb
+    X4,0: 16nb
+    
+    X0,1: nb      (nb + 2nb -> 3nb de entrada)
+    X1,1: 2nb     (2nb + 4nb -> 6nb)
+    X2,1: 4nb     (4nb + 8nb -> 12nb)
+    X3,1: 8nb     (8nb +16nb -> 24nb)
+    
+    X0,2: nb      (nb + nb + 2nb -> 4nb)
+    X1,2: 2nb     (2nb +2nb +4nb -> 8nb)
+    X2,2: 4nb     (4nb +4nb +8nb ->16nb)
+    
+    X0,3: nb      (nb +nb +nb +2nb -> 5nb)
+    X1,3: 2nb     (2nb+2nb+2nb+4nb ->10nb)
+    
+    X0,4: nb      (nb +nb +nb +nb +2nb -> 7nb)
+    """
+    def __init__(self, in_ch=3, num_classes=3, base_ch=32):
+        super().__init__()
+        nb = base_ch
+
+        # Encoder (X_,0) - usar bias=False como en el notebook
+        self.conv0_0 = ConvBlock(in_ch,    nb, use_bias=False)
+        self.conv1_0 = ConvBlock(nb,       nb*2, use_bias=False)
+        self.conv2_0 = ConvBlock(nb*2,     nb*4, use_bias=False)
+        self.conv3_0 = ConvBlock(nb*4,     nb*8, use_bias=False)
+        self.conv4_0 = ConvBlock(nb*8,     nb*16, use_bias=False)
+
+        self.pool = nn.MaxPool2d(2)
+
+        # X_,1
+        self.conv0_1 = ConvBlock(nb + nb*2,      nb, use_bias=False)      # 3nb in
+        self.conv1_1 = ConvBlock(nb*2 + nb*4,    nb*2, use_bias=False)    # 6nb in
+        self.conv2_1 = ConvBlock(nb*4 + nb*8,    nb*4, use_bias=False)    # 12nb in
+        self.conv3_1 = ConvBlock(nb*8 + nb*16,   nb*8, use_bias=False)    # 24nb in
+
+        # X_,2
+        self.conv0_2 = ConvBlock(nb + nb + nb*2, nb, use_bias=False)      # 4nb in
+        self.conv1_2 = ConvBlock(nb*2 + nb*2 + nb*4,
+                                 nb*2, use_bias=False)                    # 8nb in
+        self.conv2_2 = ConvBlock(nb*4 + nb*4 + nb*8,
+                                 nb*4, use_bias=False)                    # 16nb in
+
+        # X_,3
+        self.conv0_3 = ConvBlock(nb + nb + nb + nb*2,
+                                 nb, use_bias=False)                      # 5nb in
+        self.conv1_3 = ConvBlock(nb*2 + nb*2 + nb*2 + nb*4,
+                                 nb*2, use_bias=False)                    # 10nb in
+
+        # X0,4
+        self.conv0_4 = ConvBlock(nb + nb + nb + nb + nb*2,
+                                 nb, use_bias=False)                      # 7nb in
+
+        self.final = nn.Conv2d(nb, num_classes, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        x0_0 = self.conv0_0(x)               # nb
+        x1_0 = self.conv1_0(self.pool(x0_0)) # 2nb
+        x2_0 = self.conv2_0(self.pool(x1_0)) # 4nb
+        x3_0 = self.conv3_0(self.pool(x2_0)) # 8nb
+        x4_0 = self.conv4_0(self.pool(x3_0)) #16nb
+
+        # Nivel 1
+        x0_1 = self.conv0_1(torch.cat([
+            x0_0,
+            F.interpolate(x1_0, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+        x1_1 = self.conv1_1(torch.cat([
+            x1_0,
+            F.interpolate(x2_0, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+        x2_1 = self.conv2_1(torch.cat([
+            x2_0,
+            F.interpolate(x3_0, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+        x3_1 = self.conv3_1(torch.cat([
+            x3_0,
+            F.interpolate(x4_0, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+
+        # Nivel 2
+        x0_2 = self.conv0_2(torch.cat([
+            x0_0, x0_1,
+            F.interpolate(x1_1, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+        x1_2 = self.conv1_2(torch.cat([
+            x1_0, x1_1,
+            F.interpolate(x2_1, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+        x2_2 = self.conv2_2(torch.cat([
+            x2_0, x2_1,
+            F.interpolate(x3_1, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+
+        # Nivel 3
+        x0_3 = self.conv0_3(torch.cat([
+            x0_0, x0_1, x0_2,
+            F.interpolate(x1_2, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+        x1_3 = self.conv1_3(torch.cat([
+            x1_0, x1_1, x1_2,
+            F.interpolate(x2_2, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+
+        # Nivel 4
+        x0_4 = self.conv0_4(torch.cat([
+            x0_0, x0_1, x0_2, x0_3,
+            F.interpolate(x1_3, scale_factor=2, mode="bilinear", align_corners=False)
+        ], dim=1))
+
+        logits = self.final(x0_4)
+        return logits
 
 
 class SegmentationModel:
@@ -935,11 +1059,24 @@ class SegmentationModel:
                                 )
                         elif architecture_name == "UNetPlusPlus" or is_unetpp:
                             try:
-                                print(f"Construyendo arquitectura UNetPlusPlus...")
-                                self.model = UNetPlusPlus(
-                                    in_channels=3,
-                                    num_classes=NUM_CLASSES
-                                )
+                                # Verificar si es el modelo model_unetpp_spine_t1 que usa UNetPP con base_ch=32
+                                is_unetpp_spine_t1 = self.model_type == "model_unetpp_spine_t1"
+                                
+                                if is_unetpp_spine_t1:
+                                    # El modelo model_unetpp_spine_t1 siempre usa UNetPP con base_ch=32
+                                    print(f"Construyendo arquitectura UNetPP (base_ch=32) para model_unetpp_spine_t1...")
+                                    self.model = UNetPP(
+                                        in_ch=3,
+                                        num_classes=NUM_CLASSES,
+                                        base_ch=32
+                                    )
+                                else:
+                                    print(f"Construyendo arquitectura UNetPlusPlus...")
+                                    self.model = UNetPlusPlus(
+                                        in_channels=3,
+                                        num_classes=NUM_CLASSES
+                                    )
+                                
                                 print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
                                 missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
                                 if missing_keys:
@@ -1000,11 +1137,24 @@ class SegmentationModel:
                                 )
                         elif architecture_name == "UNetPlusPlus" or is_unetpp:
                             try:
-                                print(f"Construyendo arquitectura UNetPlusPlus...")
-                                self.model = UNetPlusPlus(
-                                    in_channels=3,
-                                    num_classes=NUM_CLASSES
-                                )
+                                # Verificar si es el modelo model_unetpp_spine_t1 que usa UNetPP con base_ch=32
+                                is_unetpp_spine_t1 = self.model_type == "model_unetpp_spine_t1"
+                                
+                                if is_unetpp_spine_t1:
+                                    # El modelo model_unetpp_spine_t1 siempre usa UNetPP con base_ch=32
+                                    print(f"Construyendo arquitectura UNetPP (base_ch=32) para model_unetpp_spine_t1...")
+                                    self.model = UNetPP(
+                                        in_ch=3,
+                                        num_classes=NUM_CLASSES,
+                                        base_ch=32
+                                    )
+                                else:
+                                    print(f"Construyendo arquitectura UNetPlusPlus...")
+                                    self.model = UNetPlusPlus(
+                                        in_channels=3,
+                                        num_classes=NUM_CLASSES
+                                    )
+                                
                                 print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
                                 # Intentar cargar con strict=False primero para ver qué falta
                                 missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
@@ -1120,11 +1270,24 @@ class SegmentationModel:
                                 )
                         elif architecture_name == "UNetPlusPlus" or is_unetpp:
                             try:
-                                print(f"Construyendo arquitectura UNetPlusPlus...")
-                                self.model = UNetPlusPlus(
-                                    in_channels=3,
-                                    num_classes=NUM_CLASSES
-                                )
+                                # Verificar si es el modelo model_unetpp_spine_t1 que usa UNetPP con base_ch=32
+                                is_unetpp_spine_t1 = self.model_type == "model_unetpp_spine_t1"
+                                
+                                if is_unetpp_spine_t1:
+                                    # El modelo model_unetpp_spine_t1 siempre usa UNetPP con base_ch=32
+                                    print(f"Construyendo arquitectura UNetPP (base_ch=32) para model_unetpp_spine_t1...")
+                                    self.model = UNetPP(
+                                        in_ch=3,
+                                        num_classes=NUM_CLASSES,
+                                        base_ch=32
+                                    )
+                                else:
+                                    print(f"Construyendo arquitectura UNetPlusPlus...")
+                                    self.model = UNetPlusPlus(
+                                        in_channels=3,
+                                        num_classes=NUM_CLASSES
+                                    )
+                                
                                 print(f"Cargando state_dict ({len(state_dict)} parámetros)...")
                                 missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
                                 if missing_keys:
@@ -1180,6 +1343,9 @@ class SegmentationModel:
         # Ajustar tamaño según el modelo (algunos modelos fueron entrenados con 256x256)
         if self.model_config.get("architecture") == "DeepLabV3PlusDenseDecoder":
             # Este modelo fue entrenado con 256x256 según el JSON de clases
+            input_size = (256, 256)
+        elif self.model_type == "model_unetpp_spine_t1":
+            # El modelo UNetPP fue entrenado con 256x256 según el JSON de clases
             input_size = (256, 256)
         else:
             input_size = INPUT_SIZE
@@ -1339,33 +1505,41 @@ class SegmentationModel:
             mask = cv2.resize(mask.astype(np.uint8), (img_array.shape[1], img_array.shape[0]), 
                             interpolation=cv2.INTER_NEAREST).astype(np.int32)
         
-        # Crear colores según la imagen de referencia: V (columna) en verde, T1 en rojo
-        # Mapear colores según el nombre de la clase
-        colors = np.zeros((len(self.classes), 3), dtype=np.uint8)
+        # Verificar si es el modelo model_unetpp_spine_t1 para visualización especial
+        is_unetpp_spine_t1 = self.model_type == "model_unetpp_spine_t1"
         
-        for i, class_name in enumerate(self.classes):
-            class_name_lower = class_name.lower()
-            # Mapear colores según el formato de deeplab_resnet50:
-            # 0: "F" (Fondo) -> negro
-            # 1: "V" (Columna) -> verde
-            # 2: "T1" (Vértebra T1) -> rojo
-            if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F' or class_name == '0':
-                colors[i] = [0, 0, 0]  # Background/F - negro
-            elif 'v' in class_name_lower or 'columna' in class_name_lower or class_name == 'V' or class_name == '1':
-                colors[i] = [0, 255, 0]  # V (Columna) - verde
-            elif 't1' in class_name_lower or class_name == 'T1' or class_name == '2':
-                colors[i] = [255, 0, 0]  # T1 - rojo
-            else:
-                # Color por defecto si no coincide
-                colors[i] = [128, 128, 128]  # Gris
-        
-        # Crear imagen de segmentación coloreada
-        # Asegurar que mask tenga la forma correcta para indexar
-        if mask.ndim == 2:
-            colored_mask = colors[mask]
+        if is_unetpp_spine_t1:
+            # Visualización especial: cada vértebra individual con colores diferentes
+            colored_mask = self._create_vertebra_visualization(mask)
         else:
-            # Si mask tiene más dimensiones, tomar solo la primera
-            colored_mask = colors[mask.reshape(-1)].reshape(*mask.shape, 3)
+            # Visualización estándar
+            # Crear colores según la imagen de referencia: V (columna) en verde, T1 en rojo
+            # Mapear colores según el nombre de la clase
+            colors = np.zeros((len(self.classes), 3), dtype=np.uint8)
+            
+            for i, class_name in enumerate(self.classes):
+                class_name_lower = class_name.lower()
+                # Mapear colores según el formato de deeplab_resnet50:
+                # 0: "F" (Fondo) -> negro
+                # 1: "V" (Columna) -> verde
+                # 2: "T1" (Vértebra T1) -> rojo
+                if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F' or class_name == '0':
+                    colors[i] = [0, 0, 0]  # Background/F - negro
+                elif 'v' in class_name_lower or 'columna' in class_name_lower or class_name == 'V' or class_name == '1':
+                    colors[i] = [0, 255, 0]  # V (Columna) - verde
+                elif 't1' in class_name_lower or class_name == 'T1' or class_name == '2':
+                    colors[i] = [255, 0, 0]  # T1 - rojo
+                else:
+                    # Color por defecto si no coincide
+                    colors[i] = [128, 128, 128]  # Gris
+            
+            # Crear imagen de segmentación coloreada
+            # Asegurar que mask tenga la forma correcta para indexar
+            if mask.ndim == 2:
+                colored_mask = colors[mask]
+            else:
+                # Si mask tiene más dimensiones, tomar solo la primera
+                colored_mask = colors[mask.reshape(-1)].reshape(*mask.shape, 3)
         
         # Asegurar que colored_mask sea uint8
         colored_mask = colored_mask.astype(np.uint8)
@@ -1389,6 +1563,70 @@ class SegmentationModel:
         overlay = cv2.addWeighted(img_uint8, 0.6, mask_uint8, 0.4, 0)
         
         return Image.fromarray(overlay)
+    
+    def _create_vertebra_visualization(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Crea visualización especial para model_unetpp_spine_t1 donde cada vértebra
+        se muestra individualmente con colores diferentes.
+        
+        Args:
+            mask: Máscara de segmentación (H, W) con valores de clase
+            
+        Returns:
+            Imagen RGB coloreada (H, W, 3)
+        """
+        h, w = mask.shape
+        colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        # Identificar índices de clases
+        class_v_idx = None
+        class_t1_idx = None
+        class_f_idx = None
+        
+        for i, class_name in enumerate(self.classes):
+            class_name_lower = class_name.lower()
+            if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F' or class_name == '0':
+                class_f_idx = i
+            elif 'v' in class_name_lower or 'columna' in class_name_lower or class_name == 'V' or class_name == '1':
+                class_v_idx = i
+            elif 't1' in class_name_lower or class_name == 'T1' or class_name == '2':
+                class_t1_idx = i
+        
+        # Fondo: negro
+        if class_f_idx is not None:
+            colored_mask[mask == class_f_idx] = [0, 0, 0]
+        
+        # T1: verde (según la imagen de referencia)
+        if class_t1_idx is not None:
+            colored_mask[mask == class_t1_idx] = [0, 255, 0]
+        
+        # V (vértebras): usar connected components para separar cada vértebra
+        if class_v_idx is not None:
+            # Crear máscara binaria solo para la clase V
+            v_mask = (mask == class_v_idx).astype(np.uint8)
+            
+            # Encontrar componentes conectados
+            num_labels, labels = cv2.connectedComponents(v_mask)
+            
+            # Generar colores diferentes para cada vértebra (usando azul como base según la imagen)
+            # Usar una paleta de azules variados para cada vértebra
+            for label_id in range(1, num_labels):  # Empezar desde 1 (0 es el fondo)
+                # Generar color azul con variación para cada vértebra
+                # Usar un hash simple basado en el label_id para generar colores consistentes
+                # Colores azules variados: desde azul oscuro hasta azul claro
+                # BGR format: [B, G, R]
+                blue_value = 180 + (label_id * 25) % 75  # Entre 180 y 255 (azul fuerte)
+                green_value = 30 + (label_id * 15) % 50   # Un poco de verde para variación
+                red_value = 0  # Mantener rojo en 0 para mantener tono azul puro
+                
+                # Asegurar que no exceda 255
+                blue_value = min(255, blue_value)
+                green_value = min(255, green_value)
+                
+                # Aplicar color a esta vértebra (formato BGR para OpenCV)
+                colored_mask[labels == label_id] = [blue_value, green_value, red_value]
+        
+        return colored_mask
     
     def calculate_metrics(self, mask: np.ndarray, probs: Optional[np.ndarray] = None) -> dict:
         """

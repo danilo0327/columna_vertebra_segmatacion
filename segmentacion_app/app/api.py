@@ -125,10 +125,17 @@ async def segment_image(
             raise HTTPException(status_code=500, detail=error_msg)
         
         # Mejorar segmentación de V (columna) primero
-        mask_improved = model.improve_v_segmentation(mask, probs)
+        try:
+            mask_improved = model.improve_v_segmentation(mask, probs)
+        except Exception as e:
+            print(f"Advertencia: Error al mejorar segmentación V, usando máscara original: {str(e)}")
+            mask_improved = mask
         
         # Luego mejorar segmentación de T1
-        mask_improved = model.improve_t1_segmentation(mask_improved, probs)
+        try:
+            mask_improved = model.improve_t1_segmentation(mask_improved, probs)
+        except Exception as e:
+            print(f"Advertencia: Error al mejorar segmentación T1, continuando: {str(e)}")
         
         # Calcular métricas (con probabilidades para IoU/Dice estimados)
         metrics = model.calculate_metrics(mask_improved, probs)

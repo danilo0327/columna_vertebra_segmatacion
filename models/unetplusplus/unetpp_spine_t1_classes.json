@@ -1,0 +1,19 @@
+{
+  "model_name": "UNetPP_spine_T1",
+  "id2label": {
+    "0": "F",
+    "1": "V",
+    "2": "T1"
+  },
+  "label2id": {
+    "F": 0,
+    "V": 1,
+    "T1": 2
+  },
+  "num_classes": 3,
+  "img_size": [
+    256,
+    256
+  ],
+  "notes": "0=Fondo, 1=Vértebras columna (todas), 2=Vértebra T1 (referencia)"
+}
