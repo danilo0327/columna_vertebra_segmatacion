@@ -1505,41 +1505,33 @@ class SegmentationModel:
             mask = cv2.resize(mask.astype(np.uint8), (img_array.shape[1], img_array.shape[0]), 
                             interpolation=cv2.INTER_NEAREST).astype(np.int32)
         
-        # Verificar si es el modelo model_unetpp_spine_t1 para visualización especial
-        is_unetpp_spine_t1 = self.model_type == "model_unetpp_spine_t1"
+        # Visualización estándar simple: solo dos colores (V y T1)
+        # Crear colores según el nombre de la clase
+        colors = np.zeros((len(self.classes), 3), dtype=np.uint8)
         
-        if is_unetpp_spine_t1:
-            # Visualización especial: cada vértebra individual con colores diferentes
-            colored_mask = self._create_vertebra_visualization(mask)
-        else:
-            # Visualización estándar
-            # Crear colores según la imagen de referencia: V (columna) en verde, T1 en rojo
-            # Mapear colores según el nombre de la clase
-            colors = np.zeros((len(self.classes), 3), dtype=np.uint8)
-            
-            for i, class_name in enumerate(self.classes):
-                class_name_lower = class_name.lower()
-                # Mapear colores según el formato de deeplab_resnet50:
-                # 0: "F" (Fondo) -> negro
-                # 1: "V" (Columna) -> verde
-                # 2: "T1" (Vértebra T1) -> rojo
-                if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F' or class_name == '0':
-                    colors[i] = [0, 0, 0]  # Background/F - negro
-                elif 'v' in class_name_lower or 'columna' in class_name_lower or class_name == 'V' or class_name == '1':
-                    colors[i] = [0, 255, 0]  # V (Columna) - verde
-                elif 't1' in class_name_lower or class_name == 'T1' or class_name == '2':
-                    colors[i] = [255, 0, 0]  # T1 - rojo
-                else:
-                    # Color por defecto si no coincide
-                    colors[i] = [128, 128, 128]  # Gris
-            
-            # Crear imagen de segmentación coloreada
-            # Asegurar que mask tenga la forma correcta para indexar
-            if mask.ndim == 2:
-                colored_mask = colors[mask]
+        for i, class_name in enumerate(self.classes):
+            class_name_lower = class_name.lower()
+            # Mapear colores:
+            # F (Fondo) -> negro
+            # V (Columna) -> azul cian
+            # T1 -> verde
+            if 'background' in class_name_lower or 'fondo' in class_name_lower or class_name == 'F' or class_name == '0':
+                colors[i] = [0, 0, 0]  # Background/F - negro
+            elif 'v' in class_name_lower or 'columna' in class_name_lower or class_name == 'V' or class_name == '1':
+                colors[i] = [0, 200, 255]  # V (Columna) - azul cian
+            elif 't1' in class_name_lower or class_name == 'T1' or class_name == '2':
+                colors[i] = [0, 255, 0]  # T1 - verde
             else:
-                # Si mask tiene más dimensiones, tomar solo la primera
-                colored_mask = colors[mask.reshape(-1)].reshape(*mask.shape, 3)
+                # Color por defecto si no coincide
+                colors[i] = [128, 128, 128]  # Gris
+        
+        # Crear imagen de segmentación coloreada
+        # Asegurar que mask tenga la forma correcta para indexar
+        if mask.ndim == 2:
+            colored_mask = colors[mask]
+        else:
+            # Si mask tiene más dimensiones, tomar solo la primera
+            colored_mask = colors[mask.reshape(-1)].reshape(*mask.shape, 3)
         
         # Asegurar que colored_mask sea uint8
         colored_mask = colored_mask.astype(np.uint8)
@@ -1559,7 +1551,7 @@ class SegmentationModel:
             mask_uint8 = cv2.resize(mask_uint8, (img_uint8.shape[1], img_uint8.shape[0]), 
                                    interpolation=cv2.INTER_NEAREST)
         
-        # Superponer con transparencia
+        # Superponer con transparencia estándar
         overlay = cv2.addWeighted(img_uint8, 0.6, mask_uint8, 0.4, 0)
         
         return Image.fromarray(overlay)
@@ -1567,7 +1559,7 @@ class SegmentationModel:
     def _create_vertebra_visualization(self, mask: np.ndarray) -> np.ndarray:
         """
         Crea visualización especial para model_unetpp_spine_t1 donde cada vértebra
-        se muestra individualmente con colores diferentes.
+        se muestra individualmente con colores diferentes y mejor separación.
         
         Args:
             mask: Máscara de segmentación (H, W) con valores de clase
@@ -1592,39 +1584,41 @@ class SegmentationModel:
             elif 't1' in class_name_lower or class_name == 'T1' or class_name == '2':
                 class_t1_idx = i
         
-        # Fondo: negro
+        # Fondo: negro (mantener transparente en la superposición)
         if class_f_idx is not None:
             colored_mask[mask == class_f_idx] = [0, 0, 0]
         
-        # T1: verde (según la imagen de referencia)
+        # T1: verde brillante (RGB format: [R, G, B]) - Asegurar que sea muy visible
+        # APLICAR T1 PRIMERO y de forma explícita para garantizar visibilidad
         if class_t1_idx is not None:
-            colored_mask[mask == class_t1_idx] = [0, 255, 0]
+            # Verde brillante y saturado para mejor visibilidad y contraste con azul
+            t1_pixels = (mask == class_t1_idx)
+            if t1_pixels.sum() > 0:
+                colored_mask[t1_pixels] = [0, 255, 0]  # Verde puro en RGB - muy visible
         
-        # V (vértebras): usar connected components para separar cada vértebra
+        # V (vértebras): aplicar azul uniforme SOLO donde es clase V
+        # IMPORTANTE: Procesar V después de T1 para no sobrescribir T1
+        # SIMPLIFICADO: Solo aplicar color directamente sin procesamiento adicional
         if class_v_idx is not None:
-            # Crear máscara binaria solo para la clase V
-            v_mask = (mask == class_v_idx).astype(np.uint8)
+            # Crear máscara solo para la clase V, excluyendo explícitamente T1
+            v_pixels = (mask == class_v_idx)
             
-            # Encontrar componentes conectados
-            num_labels, labels = cv2.connectedComponents(v_mask)
+            # Asegurar que no incluya píxeles de T1
+            if class_t1_idx is not None:
+                t1_pixels = (mask == class_t1_idx)
+                v_pixels = v_pixels & (~t1_pixels)
             
-            # Generar colores diferentes para cada vértebra (usando azul como base según la imagen)
-            # Usar una paleta de azules variados para cada vértebra
-            for label_id in range(1, num_labels):  # Empezar desde 1 (0 es el fondo)
-                # Generar color azul con variación para cada vértebra
-                # Usar un hash simple basado en el label_id para generar colores consistentes
-                # Colores azules variados: desde azul oscuro hasta azul claro
-                # BGR format: [B, G, R]
-                blue_value = 180 + (label_id * 25) % 75  # Entre 180 y 255 (azul fuerte)
-                green_value = 30 + (label_id * 15) % 50   # Un poco de verde para variación
-                red_value = 0  # Mantener rojo en 0 para mantener tono azul puro
-                
-                # Asegurar que no exceda 255
-                blue_value = min(255, blue_value)
-                green_value = min(255, green_value)
-                
-                # Aplicar color a esta vértebra (formato BGR para OpenCV)
-                colored_mask[labels == label_id] = [blue_value, green_value, red_value]
+            # Aplicar azul cian uniforme SOLO a píxeles de V (excluyendo T1)
+            # Color azul cian: [0, 200, 255] en RGB
+            colored_mask[v_pixels] = [0, 200, 255]
+        
+        # Verificación final: Asegurar que T1 se mantenga verde (por si acaso se sobrescribió)
+        # Esto es crítico para que T1 sea visible en la superposición
+        if class_t1_idx is not None:
+            t1_final_mask = (mask == class_t1_idx)
+            if t1_final_mask.sum() > 0:
+                # Aplicar verde brillante a T1 de forma explícita
+                colored_mask[t1_final_mask] = [0, 255, 0]  # Verde puro en RGB
         
         return colored_mask
     
@@ -1771,13 +1765,20 @@ class SegmentationModel:
         """
         improved_mask = mask.copy()
         
-        # Buscar dinámicamente el índice de V
+        # Buscar dinámicamente el índice de V y T1
         v_class = self._get_class_index("V")
+        t1_class = self._get_class_index("T1")
+        
         if v_class is None:
             return improved_mask
         
-        # Crear máscara binaria de V
+        # Crear máscara binaria de V, excluyendo T1 explícitamente
         v_mask = (improved_mask == v_class).astype(np.uint8)
+        
+        # Asegurar que no incluya píxeles de T1
+        if t1_class is not None:
+            t1_mask = (improved_mask == t1_class).astype(np.uint8)
+            v_mask = cv2.bitwise_and(v_mask, cv2.bitwise_not(t1_mask))
         
         if v_mask.sum() == 0:
             return improved_mask
@@ -1814,7 +1815,12 @@ class SegmentationModel:
             v_probs = probs[v_class]
             v_connected = v_connected & (v_probs > 0.4).astype(np.uint8)
         
-        # Actualizar máscara
+        # Actualizar máscara, pero NO sobrescribir T1
+        # Asegurar que solo actualicemos píxeles que no son T1
+        if t1_class is not None:
+            t1_mask = (improved_mask == t1_class)
+            v_connected = v_connected & (~t1_mask.astype(bool)).astype(np.uint8)
+        
         improved_mask[v_connected == 1] = v_class
         
         return improved_mask
